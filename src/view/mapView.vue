@@ -16,7 +16,10 @@ import ImageWMS from 'ol/source/ImageWMS.js';//WMS 使用
 import { fromLonLat } from 'ol/proj'; //坐标转换
 
 import { ref, onMounted, onBeforeUnmount } from 'vue' 
+import {createAdminLayer,createPOILayer } from '@/map/wms'
 
+import { watch } from 'vue';
+import { useLayerStore} from '@/stores/layers.js'
 
 // ── 3. 配置区 ────────────────────────────────
 //    把会变的值集中放前面，这是你旧代码没做的（以后改起来方便）
@@ -41,18 +44,19 @@ const MasktiandituLayers = new TileLayer({
 })
 
 // ── 4. WMS 图层 ★ 今天的核心 ────────────────
-const adminLayer = new ImageLayer({
-  source: new ImageWMS({
-    url: CONFIG.WMS_URL/* /geoserver/wuhan/wms*/,
-    params: {
-      LAYERS:CONFIG.LAYER /*wuhan:admin_area*/,
-      VERSION: '1.1.1',
-    },
-    serverType: 'geoserver',
-    ratio:1.5 //流畅度
-  }),
-  opacity: 0.7,//透明度
-})
+// const adminLayer = new ImageLayer({
+//   source: new ImageWMS({
+//     url: CONFIG.WMS_URL/* /geoserver/wuhan/wms*/,
+//     params: {
+//       LAYERS:CONFIG.LAYER /*wuhan:admin_area*/,
+//       VERSION: '1.1.1',
+//     },
+//     serverType: 'geoserver',
+//     ratio:1.5 //流畅度
+//   }),
+//   opacity: 0.7,//透明度
+// })
+
 
 // ── 5. 地图 ──────────────────────────────────
 const view = new View({
@@ -65,13 +69,23 @@ const view = new View({
 
 
 let map = null     //别放进ref OL实例不进响应式
+const store = useLayerStore()
 
 onMounted(() => { 
     map = new Map({
         target: 'map',
-        layers: [tiandituLayers, MasktiandituLayers, adminLayer],
+        layers: [tiandituLayers, MasktiandituLayers],
         view
     })
+  const adminLayer=  createAdminLayer(map,CONFIG.WMS_URL,'wuhan:admin_area')
+  const poiLayer = createPOILayer(map, CONFIG.WMS_URL, 'wuhan:poi')
+  watch(() => store.visible.base, v => tiandituLayers.setVisible(v), { immediate: true })
+  watch(() => store.visible.anno, v => MasktiandituLayers.setVisible(v), { immediate: true })
+
+  watch(() => store.visible.admin, v => adminLayer.setVisible(v), { immediate: true })
+  watch(() => store.visible.poi,   v => poiLayer.setVisible(v),   { immediate: true })
+  watch(() => store.opacity.admin, v => adminLayer.setOpacity(v), { immediate: true })
+  watch(() => store.opacity.poi,   v => poiLayer.setOpacity(v),   { immediate: true })
 })
 
 onBeforeUnmount(() => {
