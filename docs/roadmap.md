@@ -22,7 +22,7 @@
 
 | 阶段 | 功能 | 交付物 | 依赖 |
 |---|---|---|---|
-| **D5–D6** | 后端起项目 + 第一个查询接口 | `/api/hello`、`/api/build`（13 区 GeoJSON） | Maven / JDK17 / PostGIS |
+| **D5–D6** | 后端起项目 + 第一个查询接口 | `/api/hello`、`/api/areas`（13 区 GeoJSON） | Maven / JDK17 / PostGIS |
 | **D8–D9** | 三个业务接口 | `/api/poi/{gid}`、`/api/poi/nearby`、`/api/stats` | D6 的 MyBatis |
 | **D10–D11** | 测试 | `mvn test` 绿（3 用例） | D9 |
 | **D12** | 地图交互 | 图层开关 + 透明度 + 点击弹详情 | GeoServer `wuhan:poi` ✅ |
@@ -132,6 +132,44 @@ src/
 ## 5. 后端接口契约（D8 实现前先对齐）
 
 > 原则：**键永远存在，缺值给 `null`**；不透传高德原始 JSON。
+
+### 5.0 已实现（D5）
+
+```jsonc
+// GET /api/areas  —— 武汉 13 区边界（GeoJSON FeatureCollection, WGS84）
+// 实测：HTTP 200 / 85166 bytes / ≈0.01s / 13 features
+{
+  "type": "FeatureCollection",
+  "features": [
+    {
+      "type": "Feature",
+      "properties": {
+        "adcode": 420107,             // integer，行政区码
+        "name": "青山区",
+        "level": "district",
+        "center": [114.3915169, 30.6364754]   // [lon, lat]，float8[]
+      },
+      "geometry": {                   // ★ 是对象，不是字符串（SQL 里 ST_AsGeoJSON(geom)::json）
+        "type": "MultiPolygon",
+        "coordinates": [/* 环 → 点 → [lon, lat] */]
+      }
+    }
+  ]
+}
+```
+
+- 返回类型：`JsonNode`（结构由 SQL 决定、geometry 多态，不适合 DTO）
+- 前端消费（D12）：
+  ```js
+  const data = await (await fetch('/api/areas')).json();
+  new GeoJSON().readFeatures(data, {
+    dataProjection: 'EPSG:4326',     // 后端是 WGS84 经纬度
+    featureProjection: 'EPSG:3857',  // View 是 3857，交给 OL 转换
+  });
+  ```
+- 另有两个探针接口：`/api/hello`（Web 层）、`/api/ping-db`（返回 `13`，证数据库链路）
+
+### 5.1 D8 待实现
 
 ```jsonc
 // GET /api/poi/{gid}

@@ -21,7 +21,11 @@ export default defineConfig({
       '/geoserver': {
         target: 'http://localhost:8080', //转发到哪
         changeOrigin: true, //要不要改 Host 头（GeoServer 认这个）
-      }
+      },
+      '/api': {
+        target: 'http://localhost:8094',
+        changeOrigin: true,
+},
     }
   }
 })
