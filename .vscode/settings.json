@@ -1,0 +1,15 @@
+{
+  // ① 语言服务器自己跑在哪个 JVM 上。不配它会去下载一个 JRE 塞到 C 盘
+  "java.jdt.ls.java.home": "D:\\java",
+
+  // ② 你项目编译/索引用的 JDK。必须和 pom 的 java.version=17 对上
+  "java.configuration.runtimes": [
+    { "name": "JavaSE-17", "path": "D:\\java", "default": true }
+  ],
+
+  // ③ 让它用你配了阿里云镜像的那份 settings.xml，而不是内置的干净配置
+  "java.configuration.maven.globalSettings": "D:\\maven\\conf\\settings.xml",
+
+  // ④ 明确 mvn 在哪，别让它去猜
+  "maven.executable.path": "D:\\maven\\bin\\mvn.cmd"
+}
