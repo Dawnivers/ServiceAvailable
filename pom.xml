@@ -17,13 +17,13 @@
     <java.version>17</java.version>
   </properties>
 
-  <!-- ③ 依赖：三个就够今天用，别一次堆满 -->
+
   <dependencies>
     <dependency>                      <!-- REST / 内置 Tomcat -->
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-web</artifactId>
     </dependency>
-    <dependency>                      <!-- JdbcTemplate（不是 MyBatis，D6 再说） -->
+    <dependency>                      <!-- JdbcTemplate（MyBatis 也依赖它提供 DataSource） -->
       <groupId>org.springframework.boot</groupId>
       <artifactId>spring-boot-starter-jdbc</artifactId>
     </dependency>
@@ -31,6 +31,11 @@
       <groupId>org.postgresql</groupId>
       <artifactId>postgresql</artifactId>
       <scope>runtime</scope>
+    </dependency>
+    <dependency>
+      <groupId>org.mybatis.spring.boot</groupId>
+      <artifactId>mybatis-spring-boot-starter</artifactId>
+      <version>3.0.5</version>
     </dependency>
   </dependencies>
 

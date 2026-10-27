@@ -1,0 +1,26 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<!-- namespace 必须 = 接口的全限定名，否则绑定不上 -->
+<mapper namespace="com.dawnivers.be.mapper.AreaMapper">
+
+    <!-- id 必须 = 接口方法名 -->
+    <select id="countAreas" resultType="java.lang.Long">
+        select count(*) from admin_area
+    </select>
+
+    <!-- 你昨天那条 65 行 SQL，原样搬进来 -->
+    <select id="selectAreasGeoJson" resultType="java.lang.String">
+       SELECT json_build_object('type','FeatureCollection','features', json_agg(f))
+FROM (
+  SELECT json_build_object(
+    'type','Feature',
+    'properties', json_build_object('adcode',adcode,'name',name,'level',level,'center',center),
+    'geometry', ST_AsGeoJSON(geom)::json
+  ) AS f
+  FROM admin_area
+) t
+    </select>
+
+</mapper>
