@@ -173,46 +173,61 @@ src/
 
 ```jsonc
 // GET /api/poi/{gid}
+// 字段已核对 poi 表真实结构（2026-10-27）
 {
-  "gid": 10231,
+  "gid": 10231,                    // bigint → Java long（不是 int）
   "amap_id": "B0FF…",
   "name": "武汉大学",
-  "category": "school",            // school | hospital | mall | park
+  "category": "school",            // school | hospital | mall | park（实测就这 4 类）
   "typecode": "141201",
-  "address": "武昌区珞珈山街道八一路299号",
-  "adname": "武昌区",
-  "tel": null,
-  "lon": 114.3622,
-  "lat": 30.5386,
-  "photos": [],
-  "biz_ext": null,
-  "detail_fetched": false          // false=没查过详情；true=查过（可能为空）
+  "address": "武昌区珞珈山街道八一路299号",   // 100/16016 为 null
+  "adname": "武昌区",               // ★ poi 表无此列：需 JOIN admin_area (adcode) 取，或删掉此字段
+  "tel": null,                     // 7242/16016 (45%) 为 null，走 null 降级
+  "lon": 114.3622,                 // 取自 ST_X(geom)；实测与 lon 列完全一致（全表 max_diff_m = 0）
+  "lat": 30.5386,                  // 取自 ST_Y(geom)；两者等价，统一用 geom 为准
+  "photos": [],                    // ★ 无独立列：取 raw->'photos'（16016/16016 都有该键）
+  "biz_ext": null,                 // 取 raw->'biz_ext'（可能不存在）
+  "detail_fetched": false          // ★ 由 detail_fetched_at is not null 算；当前 detail 全为 null，恒为 false
 }
 ```
 
+**三条取值规则（D8 实现时照做）**：
+
+1. **坐标统一用 `ST_X(geom)` / `ST_Y(geom)`** —— 虽然 `lon/lat` 两列与 geom **完全一致**（实测 `max_diff_m = 0`、`rows_over_1m = 0`），但 geom 是 ETL 转 WGS84 后的权威源，`lon/lat` 是冗余副本，将来若只转了一个不会出错。
+2. **`photos` 从 `raw->'photos'` 取**，可能为空数组；`raw` 是 jsonb，PG 里直接 `raw->'photos'` 拿 json 值。若要在 Java 里得到 `List<String>`，SQL 里 `::json` 或 `json_array_length` 均可。
+3. **`adname` 要么 JOIN，要么删** —— 建议 **D8 先删掉这个字段**（D12 的详情卡用 `name` + `address` 已够），D19 需要时再 JOIN 补上。
+
 ```jsonc
 // GET /api/poi/nearby?lon=114.36&lat=30.54&radius=800
+// 实测基线：圆心 114.36,30.54（武大一带）半径 800 m → count 124
 {
-  "count": 187,
+  "count": 124,
   "center": { "lon": 114.36, "lat": 30.54 },
   "radius_m": 800,
-  "by_category": { "school": 62, "hospital": 71, "mall": 41, "park": 13 },
+  "by_category": { "school": 109, "mall": 10, "park": 3, "hospital": 2 },  // ★ 四类键必须都在，缺的补 0
   "nearest": [
-    { "name": "武汉大学医院", "category": "hospital", "distance_m": 210 }
+    { "name": "武汉大学-教1楼", "category": "school", "distance_m": 53 },
+    { "name": "武汉大学国内合作部", "category": "school", "distance_m": 62 }
   ]
 }
 ```
 
+**边界情况（必须测）**：0 条时返回 `{"count": 0, "by_category": {4 类全 0}, "nearest": []}`，**不能 500**；`radius` ≤ 0 或 > 5000 → 400。
+
 ```jsonc
 // GET /api/stats/coverage?district=武昌区
+// ★ 以下为实测真实值（2026-10-27），与旧稿的 1782 / 305.6 差异已查明
 {
   "district": "武昌区",
-  "total": 1782,
-  "area_km2": 305.6,
-  "per_km2": 5.83,
-  "by_category": { "school": 517, "hospital": 313, "mall": 421, "park": 121 }
+  "total": 1681,                   // 实测
+  "area_km2": 100.1,               // 实测：DataV 边界是陆域轮廓，不是含水域的行政面积
+  "per_km2": 16.79,                // 1681 / 100.1
+  "by_category": { "school": 525, "hospital": 590, "mall": 447, "park": 119 }
 }
 ```
+
+> 旧稿写 `total: 1782` / `area_km2: 305.6` / `per_km2: 5.83`，是把“含水域行政面积”当成了边界面积。若将来想用行政面积口径，需另存一份面积字段，不要用 `ST_Area(geom)`。
+> 13 区 POI 实测分布：洪山1940 / 武昌1681 / 江夏1634 / 江岸1382 / 黄陂1352 / 蔡甸1336 / 汉阳1244 / 东西湖1213 / 硚口1178 / 新洲1170 / 江汉1104 / 青山582 / 汉南200。
 
 **错误约定**：HTTP 400 参数缺失、404 资源不存在、500 内部错误；body 统一 `{ "code": 400, "message": "…" }`。
 
@@ -264,3 +279,79 @@ src/
 | 每次拖动重绘一张整屏 WMS | `ImageWMS`，约 80–150 KB/次 | 明显卡 → 换 `TileWMS` + GWC 缓存 |
 | 全市 16k 点在低缩放渲染 | 样式已用 `MinScaleDenominator` 收成 3 px 小点 | 仍慢 → GeoServer 侧聚合 / MVT |
 | 高缩放查看细节 | 图钉 36 px + 标签 | 标签重叠 → `VendorOption conflictResolution`（已开） |
+
+---
+
+## 10. 数据库索引与迁移（D6 补，2026-10-27）
+
+> 建索引和 `ANALYZE` 都不进 git，**换台机器部署时必须手动执行本节**。执行顺序即下方顺序。
+
+### 10.1 空间索引（必需）
+
+`poi` 原本只有 4 个 btree 索引（`gid` / `amap_id` / `category` / `adcode`），**没有任何空间索引**，
+`ST_DWithin` 查询走全表扫。2026-10-27 已补：
+
+```sql
+-- ★ 必须是"表达式索引"：查询里筛的是 geom::geography，索引也要建在同一个表达式上
+--   写成 GIST (geom) 用不上（PG 认为 geom ≠ geom::geography）
+--   双括号 ((...)) 是 PG 建表达式索引的语法，少一层会报语法错
+CREATE INDEX idx_poi_geog ON poi USING GIST ((geom::geography));
+
+ANALYZE poi;   -- 大批量导入后必做，否则优化器用旧的行数分布
+```
+
+**实测收益**（`poi` 表 16016 行，圆心 `114.36, 30.54`，半径 800 m，`order by distance_m, gid limit 5`）：
+
+| 指标 | 建索引前 | 建索引后 |
+|---|---|---|
+| 执行计划 | `Parallel Seq Scan` | `Bitmap Index Scan on idx_poi_geog` |
+| 执行时间 | 88.4 ms | **23.9 ms** |
+| 读数据页 `Buffers` | 4758 | **200** |
+| 规划成本 `cost` | 88388 | 1629 |
+
+> 注意：早先误建的 `idx_poi_geom_gist ON poi USING GIST (geom)` **用不上**，已删除。
+> 规则：凡 `where` 里对列做了函数/类型转换（`::`、`lower()`、`ST_Transform()`），想走索引就必须建**表达式索引**。
+
+### 10.2 nearby 查询的标准写法（D8/D13 照此实现）
+
+```sql
+-- 分类计数：ST_DWithin 筛范围，::geography 决定单位是"米"
+select category, count(*) as cnt
+from poi
+where ST_DWithin(
+        geom::geography,
+        ST_SetSRID(ST_MakePoint(114.36, 30.54), 4326)::geography,
+        800)
+group by category
+order by cnt desc;
+
+-- 最近 N 个：ST_DWithin 粗筛 + ST_Distance 精算（别在 where 里用 ST_Distance，会逐行精算）
+select name, category,
+       round(ST_Distance(geom::geography,
+             ST_SetSRID(ST_MakePoint(114.36, 30.54), 4326)::geography)) as distance_m
+from poi
+where ST_DWithin(geom::geography,
+        ST_SetSRID(ST_MakePoint(114.36, 30.54), 4326)::geography, 800)
+order by distance_m, gid          -- ★ 加 gid：距离并列时结果才稳定（否则测试会偶发失败）
+limit 5;
+```
+
+**三个必守的细节**：
+- 漏 `::geography` → 单位变成"度"，`800` 会匹配全表且不报错（静默错）
+- `ST_MakePoint(lon, lat)` 参数顺序是**经度在前**，写反得到南极附近的点，返回空但不报错
+- `ST_MakePoint` 出来 SRID=0，必须 `ST_SetSRID(..., 4326)` 否则报 `mixed SRID geometries`
+
+### 10.3 其他索引
+
+| 索引 | 用途 |
+|---|---|
+| `poi_pkey1 (gid)` | 主键，`/api/poi/{gid}` 已可用 |
+| `idx_poi_adcode (adcode)` | `/api/stats/coverage` 按区筛（`p.adcode = a.adcode::text`） |
+| `idx_poi_category (category)` | 分类筛选（D12 图层类别 chips 若下沉到 BE 则用到） |
+
+### 10.4 改表结构/导数据后
+
+```sql
+ANALYZE poi;        -- 补统计，不影响业务读写
+```
+`autovacuum` 会在改动量达阈值时自动跑 `ANALYZE`，手动执行只针对「一次性大批量导入」和「调试执行计划」两个场景。
