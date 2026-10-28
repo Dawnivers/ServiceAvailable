@@ -169,33 +169,48 @@ src/
   ```
 - 另有两个探针接口：`/api/hello`（Web 层）、`/api/ping-db`（返回 `13`，证数据库链路）
 
-### 5.1 D8 待实现
+### 5.1 已实现（D8 第一个接口，2026-10-28）
 
 ```jsonc
-// GET /api/poi/{gid}
-// 字段已核对 poi 表真实结构（2026-10-27）
+// GET /api/poi/{gid}  —— 实测 gid=1 原样输出
 {
-  "gid": 10231,                    // bigint → Java long（不是 int）
-  "amap_id": "B0FF…",
-  "name": "武汉大学",
-  "category": "school",            // school | hospital | mall | park（实测就这 4 类）
-  "typecode": "141201",
-  "address": "武昌区珞珈山街道八一路299号",   // 100/16016 为 null
-  "adname": "武昌区",               // ★ poi 表无此列：需 JOIN admin_area (adcode) 取，或删掉此字段
-  "tel": null,                     // 7242/16016 (45%) 为 null，走 null 降级
-  "lon": 114.3622,                 // 取自 ST_X(geom)；实测与 lon 列完全一致（全表 max_diff_m = 0）
-  "lat": 30.5386,                  // 取自 ST_Y(geom)；两者等价，统一用 geom 为准
-  "photos": [],                    // ★ 无独立列：取 raw->'photos'（16016/16016 都有该键）
-  "biz_ext": null,                 // 取 raw->'biz_ext'（可能不存在）
-  "detail_fetched": false          // ★ 由 detail_fetched_at is not null 算；当前 detail 全为 null，恒为 false
+  "gid": 1,                        // bigint → Java Long（用包装类，不是 long）
+  "amapId": "B001B0IZT0",          // ★ 键是驼峰 amapId，不是 amap_id（Jackson 序列化 record 字段名）
+  "name": "解放公园",
+  "category": "park",              // school | hospital | mall | park（库内实测就这 4 类）
+  "typecode": "110101",
+  "address": "解放大道1861号",       // 100/16016 为 null
+  "tel": "027-82421760",           // 7242/16016 (45%) 为 null，null 时原样输出 null
+  "lon": 114.292598,               // 取自 ST_X(geom)
+  "lat": 30.610841,                // 取自 ST_Y(geom)
+  "photos": [                      // ★ 是 JSON 数组（不是字符串），恒存在，无照片时是 []
+    "http://store.is.autonavi.com/showpic/26df2710...",
+    "http://store.is.autonavi.com/showpic/ec9d8ab5...",
+    "http://store.is.autonavi.com/showpic/342d282b..."
+  ],
+  "detailFetched": false           // ★ 驼峰；由 detail_fetched_at is not null 算；当前恒为 false
 }
 ```
 
-**三条取值规则（D8 实现时照做）**：
+**状态码**（已实测）：
 
-1. **坐标统一用 `ST_X(geom)` / `ST_Y(geom)`** —— 虽然 `lon/lat` 两列与 geom **完全一致**（实测 `max_diff_m = 0`、`rows_over_1m = 0`），但 geom 是 ETL 转 WGS84 后的权威源，`lon/lat` 是冗余副本，将来若只转了一个不会出错。
-2. **`photos` 从 `raw->'photos'` 取**，可能为空数组；`raw` 是 jsonb，PG 里直接 `raw->'photos'` 拿 json 值。若要在 Java 里得到 `List<String>`，SQL 里 `::json` 或 `json_array_length` 均可。
-3. **`adname` 要么 JOIN，要么删** —— 建议 **D8 先删掉这个字段**（D12 的详情卡用 `name` + `address` 已够），D19 需要时再 JOIN 补上。
+| 请求 | 返回 |
+|---|---|
+| `/api/poi/1` | `200` + 上述对象 |
+| `/api/poi/39`（无照片） | `200`，`photos: []` |
+| `/api/poi/999999999`（不存在） | `404`，`throw ResponseStatusException(NOT_FOUND)` |
+| `/api/poi/abc`（非数字） | `400`，Spring 自动转换失败，服务端只打 WARN |
+
+**实现要点（踩过的坑，D9 写 nearby/stats 时复用）**：
+
+1. **坐标统一用 `ST_X(geom)` / `ST_Y(geom)`** —— 实测 `lon/lat` 两列与 geom **完全一致**（全表 `max_diff_m = 0`、`rows_over_1m = 0`），但 geom 是 ETL 转 WGS84 后的权威源，`lon/lat` 是冗余副本。
+2. **`photos` 只取 url**：SQL 用 `jsonb_path_query_array(raw, '$.photos[*].url')::text as photos`。
+   原 `raw->'photos'` 是**对象数组**（`{"url":..., "title":..., "provider":[]}`），其中 `title` 有 99.87%（35953/36000）是空数组 `[]`、仅 0.13%（47 条）是字符串（"春季"/"秋季"等），**类型不一致** —— 为 0.13% 保留 title 不值得，故只提 url。若要 title，改用 `List<Map<String,Object>>`。
+3. **`photos` 需要自定义 TypeHandler**：`config/StringListTypeHandler`（jsonb 文本 → `List<String>`，空值归一成 `[]`）。MyBatis 内置没有 jsonb→List 的转换器，不写就报 `argument type mismatch`。
+4. **`PoiDto` 用 record + `<constructor>` resultMap**；**DTO 字段用包装类（`Long`/`Double`/`Boolean`）而非基本类型** —— MyBatis 内部装箱成包装类，用基本类型会报 `NoSuchMethodException`。
+5. **`adname`、`biz_ext` 未实现** —— `poi` 表无 `adname` 列（需 JOIN `admin_area` 才有）；`biz_ext` 需另取 `raw->'biz_ext'`。两者都留到 D12 详情卡再补。
+
+### 5.2 D9 待实现
 
 ```jsonc
 // GET /api/poi/nearby?lon=114.36&lat=30.54&radius=800
