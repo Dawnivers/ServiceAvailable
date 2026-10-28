@@ -60,4 +60,46 @@
         where gid = #{gid}
     </select>
 
+    <resultMap id="CategoryCountMap" type="com.dawnivers.be.dto.CategoryCount">
+        <constructor>
+            <arg column="category" javaType="java.lang.String"/>
+            <arg column="cnt"      javaType="java.lang.Long"/>
+        </constructor>
+    </resultMap>
+
+    <!-- ① 分类计数 -->
+<select id="countByCategory" resultMap="CategoryCountMap">
+    select category, count(*) as cnt
+    from poi
+    where ST_DWithin(
+            geom::geography,
+            ST_SetSRID(ST_MakePoint(#{lon}, #{lat}), 4326)::geography,
+            #{radius})
+    group by category
+</select>
+
+<resultMap id="NearestDtoMap" type="com.dawnivers.be.dto.NearestDto">
+    <constructor>
+        <arg column="name"        javaType="java.lang.String"/>
+        <arg column="category"    javaType="java.lang.String"/>
+        <arg column="distanceM"   javaType="java.lang.Double"/>
+    </constructor>
+</resultMap>
+
+<!-- ② 最近 N 个 -->
+<select id="nearest" resultMap="NearestDtoMap">
+    select name, category,
+           round(ST_Distance(
+               geom::geography,
+               ST_SetSRID(ST_MakePoint(#{lon}, #{lat}), 4326)::geography)) as "distanceM"
+    from poi
+    where ST_DWithin(
+            geom::geography,
+            ST_SetSRID(ST_MakePoint(#{lon}, #{lat}), 4326)::geography,
+            #{radius})
+    order by "distanceM", gid
+    limit #{limit}
+</select>
+
+
 </mapper>
