@@ -1,0 +1,63 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<mapper namespace="com.dawnivers.be.mapper.PoiMapper">
+
+    <!-- ══════════════════════════════════════════════════════════
+         ① resultMap 本体：把「结果集的一行」映射成「PoiDto 一个对象」
+         因为 PoiDto 是 record（无 setter），必须用 <constructor>
+         顺序严格对齐 PoiDto 的构造器参数顺序（共 11 个）
+         ══════════════════════════════════════════════════════════ -->
+    <resultMap id="PoiDtoMap" type="com.dawnivers.be.dto.PoiDto">
+        <constructor>
+            <!-- 1  gid               long        ← 主键用 <idArg> -->
+            <idArg column="gid" javaType="long"/>
+
+            <!-- 2  amapId            String -->
+            <arg column="amap_id"  javaType="java.lang.String"/>
+
+            <!-- 3  name              String -->
+            <arg column="name"     javaType="java.lang.String"/>
+
+            <!-- 4  category          String -->
+            <arg column="category" javaType="java.lang.String"/>
+
+            <!-- 5  typecode          String -->
+            <arg column="typecode" javaType="java.lang.String"/>
+
+            <!-- 6  address           String -->
+            <arg column="address"  javaType="java.lang.String"/>
+
+            <!-- 7  tel               String（可能为 null） -->
+            <arg column="tel"      javaType="java.lang.String"/>
+
+            <!-- 8  lon               double -->
+            <arg column="lon"      javaType="double"/>
+
+            <!-- 9  lat               double -->
+            <arg column="lat"      javaType="double"/>
+
+            <!-- 10 photos            List<String>  ★ 需要自定义 TypeHandler -->
+            <arg column="photos"   javaType="java.util.List"
+                 typeHandler="com.dawnivers.be.config.StringListTypeHandler"/>
+
+            <!-- 11 detailFetched     boolean -->
+            <arg column="detail_fetched" javaType="boolean"/>
+        </constructor>
+    </resultMap>
+
+    <!-- ══════════════════════════════════════════════════════════
+         ② 查询语句：resultType 换成 resultMap 引用上面的定义
+         SQL 本身与之前完全一致，一行没改
+         ══════════════════════════════════════════════════════════ -->
+    <select id="selectByGid" resultMap="PoiDtoMap">
+        select gid, amap_id, name, category, typecode, address, tel,
+               ST_X(geom) as lon, ST_Y(geom) as lat,
+               jsonb_path_query_array(raw, '$.photos[*].url')::text as photos,
+               detail_fetched_at is not null as detail_fetched
+        from poi
+        where gid = #{gid}
+    </select>
+
+</mapper>
