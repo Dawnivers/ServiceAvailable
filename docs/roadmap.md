@@ -210,24 +210,58 @@ src/
 4. **`PoiDto` 用 record + `<constructor>` resultMap**；**DTO 字段用包装类（`Long`/`Double`/`Boolean`）而非基本类型** —— MyBatis 内部装箱成包装类，用基本类型会报 `NoSuchMethodException`。
 5. **`adname`、`biz_ext` 未实现** —— `poi` 表无 `adname` 列（需 JOIN `admin_area` 才有）；`biz_ext` 需另取 `raw->'biz_ext'`。两者都留到 D12 详情卡再补。
 
-### 5.2 D9 待实现
+### 5.2 已实现（D9，2026-10-28）
 
 ```jsonc
-// GET /api/poi/nearby?lon=114.36&lat=30.54&radius=800
-// 实测基线：圆心 114.36,30.54（武大一带）半径 800 m → count 124
+// GET /api/poi/nearby?lon=114.36&lat=30.54&radius=800&limit=5  —— 实测原样输出
+// 圆心 114.36,30.54（武大一带）半径 800 m
 {
   "count": 124,
   "center": { "lon": 114.36, "lat": 30.54 },
-  "radius_m": 800,
-  "by_category": { "school": 109, "mall": 10, "park": 3, "hospital": 2 },  // ★ 四类键必须都在，缺的补 0
-  "nearest": [
-    { "name": "武汉大学-教1楼", "category": "school", "distance_m": 53 },
-    { "name": "武汉大学国内合作部", "category": "school", "distance_m": 62 }
+  "radiusM": 800.0,                    // ★ 驼峰 radiusM（不是 radius_m）
+  "byCategory": {                      // ★ 驼峰；四类键恒存在，缺的补 0
+    "school": 109, "hospital": 2, "mall": 10, "park": 3
+  },
+  "nearest": [                         // 按 distanceM, gid 排序（并列时按 gid 稳定）
+    { "name": "武汉大学-教1楼",             "category": "school", "distanceM": 53.0 },
+    { "name": "教育部武汉大学文科文献信息中心", "category": "school", "distanceM": 62.0 },
+    { "name": "武汉大学国内合作部",          "category": "school", "distanceM": 62.0 },
+    { "name": "武汉大学招生就业处组织部",     "category": "school", "distanceM": 67.0 },
+    { "name": "武汉大学-审计处",            "category": "school", "distanceM": 77.0 }
   ]
 }
 ```
 
-**边界情况（必须测）**：0 条时返回 `{"count": 0, "by_category": {4 类全 0}, "nearest": []}`，**不能 500**；`radius` ≤ 0 或 > 5000 → 400。
+**参数**：
+
+| 参数 | 必填 | 默认 | 校验 |
+|---|---|---|---|
+| `lon` | ✅ | — | **目前未校验**（技术债，见下） |
+| `lat` | ✅ | — | **目前未校验** |
+| `radius` | ❌ | `800` | `(0, 5000]`，越界 400 |
+| `limit` | ❌ | `5` | `(0, 50]`，越界 400 |
+
+**状态码**（已实测）：
+
+| 请求 | 返回 |
+|---|---|
+| `?lon=114.36&lat=30.54&radius=800` | `200`，`count: 124` |
+| `?lon=114.40&lat=30.56&radius=800`（东湖水域） | `200`，`count: 0`、`byCategory` 四类全 0、`nearest: []` |
+| 只传 `lon/lat` | `200`，`radiusM: 800.0`（默认值生效） |
+| `radius=-5` | `400` |
+| 缺 `lon` | `400` |
+
+**实现要点**：
+
+1. **`count` 由 `byCategory` 求和，不单独查 `count(*)`** —— 保证 `count == ΣbyCategory`，前端做饼图分子分母天然一致；并发写入时也不会出现两者不等。
+2. **`byCategory` 先铺四类为 0，再用实际结果覆盖**（`LinkedHashMap` 保持固定顺序）—— 不需要判断"缺了哪个"，新增类目也能自动带出。
+3. **`order by "distanceM", gid`** —— 加 `gid` 保证距离并列时顺序稳定，否则 D10 的测试会偶发失败。
+4. **SQL 别名 `as "distanceM"` 必须带双引号** —— PG 会把不加引号的标识符转小写（`distancem`），`resultType` 就取不到列；`order by` 里同理。
+5. **`limit #{limit}` 在 PG 驱动下可用**（`limit $1`），不需要改成 `${limit}`。
+
+**技术债（D10 补）**：`lon`/`lat` 未做范围校验，传 `lon=999&lat=888` 会返回 `count: 0` 而不是 400。
+
+### 5.3 D10 待实现
 
 ```jsonc
 // GET /api/stats/coverage?district=武昌区
@@ -235,9 +269,9 @@ src/
 {
   "district": "武昌区",
   "total": 1681,                   // 实测
-  "area_km2": 100.1,               // 实测：DataV 边界是陆域轮廓，不是含水域的行政面积
-  "per_km2": 16.79,                // 1681 / 100.1
-  "by_category": { "school": 525, "hospital": 590, "mall": 447, "park": 119 }
+  "areaKm2": 100.1,                // ★ 驼峰（原稿 area_km2）；DataV 边界是陆域轮廓
+  "perKm2": 16.79,                 // ★ 驼峰；1681 / 100.1
+  "byCategory": { "school": 525, "hospital": 590, "mall": 447, "park": 119 }   // ★ 驼峰
 }
 ```
 
@@ -315,7 +349,7 @@ CREATE INDEX idx_poi_geog ON poi USING GIST ((geom::geography));
 ANALYZE poi;   -- 大批量导入后必做，否则优化器用旧的行数分布
 ```
 
-**实测收益**（`poi` 表 16016 行，圆心 `114.36, 30.54`，半径 800 m，`order by distance_m, gid limit 5`）：
+**实测收益**（`poi` 表 16016 行，圆心 `114.36, 30.54`，半径 800 m，`order by "distanceM", gid limit 5`）：
 
 | 指标 | 建索引前 | 建索引后 |
 |---|---|---|
@@ -341,13 +375,14 @@ group by category
 order by cnt desc;
 
 -- 最近 N 个：ST_DWithin 粗筛 + ST_Distance 精算（别在 where 里用 ST_Distance，会逐行精算）
+-- ★ 别名写 "distanceM"（双引号保留大小写，对应 Java 的 distanceM 字段）
 select name, category,
        round(ST_Distance(geom::geography,
-             ST_SetSRID(ST_MakePoint(114.36, 30.54), 4326)::geography)) as distance_m
+             ST_SetSRID(ST_MakePoint(114.36, 30.54), 4326)::geography)) as "distanceM"
 from poi
 where ST_DWithin(geom::geography,
         ST_SetSRID(ST_MakePoint(114.36, 30.54), 4326)::geography, 800)
-order by distance_m, gid          -- ★ 加 gid：距离并列时结果才稳定（否则测试会偶发失败）
+order by "distanceM", gid          -- ★ 加 gid：距离并列时结果才稳定（否则测试会偶发失败）
 limit 5;
 ```
 
