@@ -129,11 +129,24 @@ src/
 
 ---
 
-## 5. 后端接口契约（D8 实现前先对齐）
+## 5. 后端接口契约（全 6 个已实现，2026-10-29）
 
 > 原则：**键永远存在，缺值给 `null`**；不透传高德原始 JSON。
 
-### 5.0 已实现（D5）
+### 5.0 接口总览（D12 前端按此开发）
+
+| # | 接口 | 状态 | 参数 | 实测基线 |
+|---|---|---|---|---|
+| 1 | `GET /api/hello` | ✅ D5 | — | `{"message":"BE is up",...}` |
+| 2 | `GET /api/ping-db` | ✅ D5 | — | `13` |
+| 3 | `GET /api/areas` | ✅ D5 | — | 85166 bytes / 13 features |
+| 4 | `GET /api/poi/{gid}` | ✅ D7 | path `gid` | `/api/poi/1` → 解放公园 / 3 张照片 |
+| 5 | `GET /api/poi/nearby` | ✅ D8 | `lon` `lat` [radius=800] [limit=5] | 114.36,30.54,800 → count 124 |
+| 6 | `GET /api/stats/coverage` | ✅ D9 | `adcode` | 420106 → total 1681 / perKm2 16.8 |
+
+**约定**：JSON 字段**全驼峰**（`amapId` / `radiusM` / `byCategory` / `areaKm2`）；`photos` 恒为数组（无照片时 `[]`）；HTTP 错误统一 `{timestamp,status,error,path}`。
+
+### 5.1 已实现（D5）
 
 ```jsonc
 // GET /api/areas  —— 武汉 13 区边界（GeoJSON FeatureCollection, WGS84）
@@ -169,7 +182,7 @@ src/
   ```
 - 另有两个探针接口：`/api/hello`（Web 层）、`/api/ping-db`（返回 `13`，证数据库链路）
 
-### 5.1 已实现（D8 第一个接口，2026-10-28）
+### 5.2 已实现（D8，2026-10-28）
 
 ```jsonc
 // GET /api/poi/{gid}  —— 实测 gid=1 原样输出
@@ -210,7 +223,7 @@ src/
 4. **`PoiDto` 用 record + `<constructor>` resultMap**；**DTO 字段用包装类（`Long`/`Double`/`Boolean`）而非基本类型** —— MyBatis 内部装箱成包装类，用基本类型会报 `NoSuchMethodException`。
 5. **`adname`、`biz_ext` 未实现** —— `poi` 表无 `adname` 列（需 JOIN `admin_area` 才有）；`biz_ext` 需另取 `raw->'biz_ext'`。两者都留到 D12 详情卡再补。
 
-### 5.2 已实现（D9，2026-10-28）
+### 5.3 已实现（D9，2026-10-28）
 
 ```jsonc
 // GET /api/poi/nearby?lon=114.36&lat=30.54&radius=800&limit=5  —— 实测原样输出
@@ -259,21 +272,38 @@ src/
 4. **SQL 别名 `as "distanceM"` 必须带双引号** —— PG 会把不加引号的标识符转小写（`distancem`），`resultType` 就取不到列；`order by` 里同理。
 5. **`limit #{limit}` 在 PG 驱动下可用**（`limit $1`），不需要改成 `${limit}`。
 
-**技术债（D10 补）**：`lon`/`lat` 未做范围校验，传 `lon=999&lat=888` 会返回 `count: 0` 而不是 400。
+**nearby 技术债（D11 补）**：`lon`/`lat` 未做范围校验，传 `lon=999&lat=888` 会返回 `count: 0` 而不是 400。
 
-### 5.3 D10 待实现
+### 5.4 已实现（D10，2026-10-29）
 
 ```jsonc
-// GET /api/stats/coverage?district=武昌区
-// ★ 以下为实测真实值（2026-10-27），与旧稿的 1782 / 305.6 差异已查明
+// GET /api/stats/coverage?adcode=420106  —— 实测原样输出（武昌区）
+// ★ 参数是 adcode（integer），不是 district！中文参数在 PowerShell 下会撞编码坑
 {
+  "adcode": 420106,
   "district": "武昌区",
-  "total": 1681,                   // 实测
-  "areaKm2": 100.1,                // ★ 驼峰（原稿 area_km2）；DataV 边界是陆域轮廓
-  "perKm2": 16.79,                 // ★ 驼峰；1681 / 100.1
-  "byCategory": { "school": 525, "hospital": 590, "mall": 447, "park": 119 }   // ★ 驼峰
+  "total": 1681,
+  "areaKm2": 100.06,               // DataV 边界是陆域轮廓，不是含水域的行政面积
+  "perKm2": 16.8,                  // Java 里用 BigDecimal 算：1681 / 100.06，保留 2 位
+  "byCategory": { "school": 525, "hospital": 590, "mall": 447, "park": 119 }
 }
 ```
+
+**状态码**（已实测）：
+
+| 请求 | 返回 |
+|---|---|
+| `?adcode=420106` | `200` + 上述对象 |
+| `?adcode=999999`（不存在） | `404`（`statByAdcode` 返回 null → `ResponseStatusException`） |
+| `?adcode=abc`（非数字） | `400`（Spring 类型转换拦截） |
+
+**实现要点**：
+
+1. **参数用 `adcode` 而非区名** —— 无编码问题、天然唯一；前端从 `/api/areas` 的 feature.properties 就能拿到每个区的 `adcode`。
+2. **JOIN 必须 `p.adcode = a.adcode::text`** —— `poi.adcode` 是 text，`admin_area.adcode` 是 integer。
+3. **`total` 用 `count(p.gid)` 而不是 `count(*)`** —— 语义一致（`left join` 空匹配时 null 不计数）。分类四项用 `count(*) filter (...)` 在当前数据下结果相同（`null = 'school'` 为 NULL 不计数），为一致性建议统一写 `count(p.gid)`。
+4. **`perKm2` 在 Java 算，不在 SQL 算** —— `BigDecimal.divide(x, 2, HALF_UP)`；PG 的 `round(double, int)` 不存在（需 `::numeric`），而且放 Java 更可测。
+5. **`areaKm2 <= 0` 要做除零保护** —— Java 的 `double / 0` 返回 `Infinity`，Jackson 序列化成 `null`，前端会静默拿到 null。
 
 > 旧稿写 `total: 1782` / `area_km2: 305.6` / `per_km2: 5.83`，是把“含水域行政面积”当成了边界面积。若将来想用行政面积口径，需另存一份面积字段，不要用 `ST_Area(geom)`。
 > 13 区 POI 实测分布：洪山1940 / 武昌1681 / 江夏1634 / 江岸1382 / 黄陂1352 / 蔡甸1336 / 汉阳1244 / 东西湖1213 / 硚口1178 / 新洲1170 / 江汉1104 / 青山582 / 汉南200。
@@ -314,6 +344,10 @@ src/
 
 | 里程碑 | 判据 |
 |---|---|
+| **D5–D6 完成** ✅ | 后端 8094 起；`/api/areas` → 85166 bytes / 13 features；四层拆分（controller/service/mapper）完成，重构前后哈希一致 |
+| **D7–D8 完成** ✅ | `/api/poi/{gid}` → 200 + `photos` 数组 + 404/400 边界；`/api/poi/nearby` → count 124 / 四类齐全 / 0 条时返回空结构 |
+| **D9 完成** ✅ | `/api/stats/coverage?adcode=420106` → total 1681 / areaKm2 100.06 / perKm2 16.8 |
+| **D10–D11 完成** | `mvn test` 3 用例绿（覆盖三个业务接口的主路径） |
 | **D12 完成** | ① 页面上能看到 POI（放大出图钉）② 关闭勾选立即消失 ③ 透明度滑杆生效 ④ Network 里 `STYLES=wuhan:poi_icons` 且 200 ⑤ 拖动不卡成幻灯片 |
 | **D13 完成** | 点地图 → 画出 800 m 圆 → 右侧数字与 `ST_DWithin` 查询结果一致 |
 | **D18 完成** | 500 m 格网分级渲染（覆盖率热力）+ 图例可读 |
