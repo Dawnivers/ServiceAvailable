@@ -16,7 +16,10 @@ import com.dawnivers.be.service.PoiService;
 @RequestMapping("/api/poi")
 public class PoiController {
     private final PoiService poiService;
-    public PoiController(PoiService poiService) { this.poiService = poiService; }
+
+    public PoiController(PoiService poiService) {
+        this.poiService = poiService;
+    }
 
     @GetMapping("/{gid}")
     public PoiDto get(@PathVariable long gid) {
@@ -24,18 +27,30 @@ public class PoiController {
     }
 
     @GetMapping("/nearby")
-public NearbyDto nearby(@RequestParam double lon,
-                        @RequestParam double lat,
-                        @RequestParam(defaultValue = "800") double radius,
-                        @RequestParam(defaultValue = "5") int limit) {
-    if (radius <= 0 || radius > 5000) {
-        throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                "radius must be in (0, 5000], got " + radius);
+    public NearbyDto nearby(@RequestParam double lon,
+            @RequestParam double lat,
+            @RequestParam(defaultValue = "800") double radius,
+            @RequestParam(defaultValue = "5") int limit) {
+
+        if (lon < -180 || lon > 180) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "lon must be in [-180, 180], got " + lon);
+        }
+        if (lat < -90 || lat > 90) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "lat must be in [-90, 90], got " + lat);
+        }
+
+        if (radius <= 0 || radius > 5000) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "radius must be in (0, 5000], got " + radius);
+        }
+        if (limit <= 0 || limit > 50) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "limit must be in (0, 50], got " + limit);
+        }
+
+        return poiService.nearby(lon, lat, radius, limit);
+
     }
-    if (limit <= 0 || limit > 50) {
-        throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
-                "limit must be in (0, 50], got " + limit);
-    }
-    return poiService.nearby(lon, lat, radius, limit);
-}
 }
