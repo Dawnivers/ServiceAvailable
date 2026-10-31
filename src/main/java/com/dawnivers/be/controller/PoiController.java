@@ -10,6 +10,7 @@ import org.springframework.web.server.ResponseStatusException;
 
 import com.dawnivers.be.dto.NearbyDto;
 import com.dawnivers.be.dto.PoiDto;
+import com.dawnivers.be.dto.WithinDto;
 import com.dawnivers.be.service.PoiService;
 
 @RestController
@@ -52,5 +53,29 @@ public class PoiController {
 
         return poiService.nearby(lon, lat, radius, limit);
 
+    }
+
+    /**
+     * 不规则多边形范围统计。
+     *
+     *   GET /api/poi/within?wkt=POLYGON((...))&limit=20
+     *
+     * ★ wkt 必须 URL 编码（空格、括号、逗号）。前端用 encodeURIComponent。
+     * ★ 用 GET 而不用 POST：符合"读操作"语义，且能被浏览器缓存/直接收藏。
+     *   代价是 WKT 受请求行长度限制（service 里卡 6000 字符，约 300 个顶点）。
+     *   真要支持上千顶点的复杂边界，再改 POST + JSON body。
+     *
+     * 校验分两层：静态格式/长度在这里和 service，几何有效性用 ST_IsValid 查库。
+     */
+    @GetMapping("/within")
+    public WithinDto within(@RequestParam String wkt,
+            @RequestParam(defaultValue = "20") int limit) {
+
+        if (limit <= 0 || limit > 200) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "limit must be in (0, 200], got " + limit);
+        }
+
+        return poiService.within(wkt, limit);
     }
 }
