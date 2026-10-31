@@ -44,18 +44,52 @@
 
             <!-- 11 detailFetched     boolean -->
             <arg column="detail_fetched" javaType="boolean"/>
+
+            <!-- 12 adcode            Integer（poi.adcode 是 text，取 btrim 后转整型） -->
+            <arg column="adcode" javaType="java.lang.Integer"/>
+
+            <!-- 13-17 以下全部来自 raw jsonb，不额外消耗高德配额 -->
+            <!-- 13 adname            String（raw->>'adname'，100% 有值） -->
+            <arg column="adname"        javaType="java.lang.String"/>
+            <!-- 14 businessArea      String（raw->>'business_area'） -->
+            <arg column="business_area" javaType="java.lang.String"/>
+            <!-- 15 poiType           String（raw->>'type'，如 "风景名胜;公园广场;公园"） -->
+            <arg column="poi_type"      javaType="java.lang.String"/>
+            <!-- 16 rating            Double（仅 45% 有值，其余 null） -->
+            <arg column="rating"        javaType="java.lang.Double"/>
+            <!-- 17 openTime          String（58% 有值，可能是 "24小时营业"） -->
+            <arg column="open_time"     javaType="java.lang.String"/>
         </constructor>
     </resultMap>
 
     <!-- ══════════════════════════════════════════════════════════
-         ② 查询语句：resultType 换成 resultMap 引用上面的定义
-         SQL 本身与之前完全一致，一行没改
+         ② 查询语句
          ══════════════════════════════════════════════════════════ -->
     <select id="selectByGid" resultMap="PoiDtoMap">
         select gid, amap_id, name, category, typecode, address, tel,
                ST_X(geom) as lon, ST_Y(geom) as lat,
                jsonb_path_query_array(raw, '$.photos[*].url')::text as photos,
-               detail_fetched_at is not null as detail_fetched
+               detail_fetched_at is not null as detail_fetched,
+               -- ★ poi.adcode 是 text，admin_area.adcode 是 integer；
+               --   用 btrim 防前后空格，空串要 nullif 掉，否则 ::integer 报错
+               nullif(btrim(adcode), '')::integer as adcode,
+
+               -- ── 以下 5 个字段从 raw jsonb 挖，零额外配额 ──────────
+               -- 高德有时用空字符串占位，统一 nullif 成 null
+               nullif(raw->>'adname', '')          as adname,
+               nullif(raw->>'business_area', '')   as business_area,
+               nullif(raw->>'type', '')            as poi_type,
+
+               -- ★★ rating 的坑：同一个键有时是 "4.8"（string），
+               --   有时是 []（array）。->> 对 array 会返回字符串 "[]"，
+               --   直接 ::float8 必报 invalid input syntax。
+               --   所以先用正则确认是纯数字，不是就整列为 null。
+               case when raw->'biz_ext'->>'rating' ~ '^[0-9]+(\.[0-9]+)?$'
+                    then (raw->'biz_ext'->>'rating')::float8
+               end                                 as rating,
+
+               -- ★ open_time 同理：空数组会变 "[]"，要 nullif 掉
+               nullif(nullif(raw->'biz_ext'->>'open_time', '[]'), '') as open_time
         from poi
         where gid = #{gid}
     </select>
@@ -80,18 +114,25 @@
 
 <resultMap id="NearestDtoMap" type="com.dawnivers.be.dto.NearestDto">
     <constructor>
+        <arg column="gid"         javaType="java.lang.Long"/>
         <arg column="name"        javaType="java.lang.String"/>
         <arg column="category"    javaType="java.lang.String"/>
         <arg column="distanceM"   javaType="java.lang.Double"/>
+        <arg column="lon"         javaType="java.lang.Double"/>
+        <arg column="lat"         javaType="java.lang.Double"/>
     </constructor>
 </resultMap>
 
 <!-- ② 最近 N 个 -->
 <select id="nearest" resultMap="NearestDtoMap">
-    select name, category,
+    select gid,
+           name,
+           category,
            round(ST_Distance(
                geom::geography,
-               ST_SetSRID(ST_MakePoint(#{lon}, #{lat}), 4326)::geography)) as "distanceM"
+               ST_SetSRID(ST_MakePoint(#{lon}, #{lat}), 4326)::geography)) as "distanceM",
+           ST_X(geom) as lon,
+           ST_Y(geom) as lat
     from poi
     where ST_DWithin(
             geom::geography,
@@ -101,5 +142,67 @@
     limit #{limit}
 </select>
 
+<!-- ══════════════════════════════════════════════════════════════
+     /api/poi/within —— 不规则多边形范围统计
+     与上面 nearby 的关系：把"圆"换成"任意多边形"，
+     几何判定从 ST_DWithin(圆) 换成 ST_Within(面)。
+     ══════════════════════════════════════════════════════════════ -->
+
+<!-- ① WKT 体检：有效性 / 面积 / 形心。先跑这个，坏几何在 service 层就 400 掉 -->
+<resultMap id="WktInfoMap" type="com.dawnivers.be.dto.WktInfoDto">
+    <constructor>
+        <arg column="is_valid"  javaType="java.lang.Boolean"/>
+        <arg column="area_km2"  javaType="java.lang.Double"/>
+        <arg column="lon"       javaType="java.lang.Double"/>
+        <arg column="lat"       javaType="java.lang.Double"/>
+    </constructor>
+</resultMap>
+
+<select id="inspectWkt" resultMap="WktInfoMap">
+    select ST_IsValid(g)                      as is_valid,
+           ST_Area(g::geography) / 1000000.0  as area_km2,
+           ST_X(ST_Centroid(g))               as lon,
+           ST_Y(ST_Centroid(g))               as lat
+    from (select ST_GeomFromText(#{wkt}, 4326) as g) t
+</select>
+
+<!-- ② 多边形内按类别计数
+     ★ ST_Within 只有 geometry 版本，没有 geography 版本
+       （对 geom 加 ::geography 会报 "函数 st_within(geography, geography) 不存在"）
+       多边形判定直接用 geometry，SRID 统一 4326 -->
+<select id="countByCategoryWithin" resultMap="CategoryCountMap">
+    select category, count(*) as cnt
+    from poi
+    where ST_Within(geom, ST_GeomFromText(#{wkt}, 4326))
+    group by category
+</select>
+
+<!-- ③ 多边形内距形心最近的 N 条
+     ★ 多边形没有"圆心"，排序基准用 ST_Centroid。
+       凹多边形/多边形的形心可能落在图形外面，这只影响排序，不影响筛选 -->
+<resultMap id="WithinItemMap" type="com.dawnivers.be.dto.WithinItem">
+    <constructor>
+        <arg column="gid"       javaType="java.lang.Long"/>
+        <arg column="name"      javaType="java.lang.String"/>
+        <arg column="category"  javaType="java.lang.String"/>
+        <arg column="distanceM" javaType="java.lang.Double"/>
+        <arg column="lon"       javaType="java.lang.Double"/>
+        <arg column="lat"       javaType="java.lang.Double"/>
+    </constructor>
+</resultMap>
+
+<select id="itemsWithin" resultMap="WithinItemMap">
+    with shape as (select ST_GeomFromText(#{wkt}, 4326) as g)
+    select p.gid, p.name, p.category,
+           round(ST_Distance(
+               p.geom::geography,
+               ST_Centroid(shape.g)::geography)) as "distanceM",
+           ST_X(p.geom) as lon,
+           ST_Y(p.geom) as lat
+    from poi p, shape
+    where ST_Within(p.geom, shape.g)
+    order by "distanceM", p.gid      -- ★ 加 gid：距离并列时结果才稳定
+    limit #{limit}
+</select>
 
 </mapper>
