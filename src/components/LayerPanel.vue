@@ -129,7 +129,7 @@ function ratio(layer) {
 .layer-panel {
   position: absolute;
   left: 16px;
-  top: 72px;
+  top: 76px;
   z-index: 15;
   background: rgba(255, 255, 255, 0.95);
   border: 1px solid #dde5ec;
