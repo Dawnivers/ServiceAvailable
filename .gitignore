@@ -39,3 +39,6 @@ __screenshots__/
 
 # Vite
 *.timestamp-*-*.mjs
+
+# 本地构建校验输出（vite build --outDir .chk）
+.chk
