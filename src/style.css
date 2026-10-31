@@ -1,10 +1,46 @@
-html, body ,#app{
+/* ── 全局高度链：html / body / #app 必须都是 100%，
+      少一环 #map 高度就是 0，连 WMS 请求都不会发 ── */
+html,
+body,
+#app {
   margin: 0;
   height: 100%;
   overflow: hidden;
 }
 
-#map{
-        width: 100%;
-        height: 100%;
-      } 
+/* 顶部栏是 fixed 的 64px，地图让出这块，
+   否则 OL 的缩放按钮会被顶栏压住 */
+#map {
+  width: 100%;
+  height: calc(100% - 64px);
+  margin-top: 64px;
+}
+
+/* ═══ 分析模式：底图去色 ═══════════════════════════════════
+   只打在 .ol-layer-base 上（底图 + 注记 + 区划，由 mapView 里
+   TileLayer / createAdminLayer 的 className 选项挂上去）。
+   POI 层不挂这个类，所以图钉仍是彩色 —— 底图退后、设施突出。
+
+   ★ 不要图省事写成 `#map.is-analysis { filter: grayscale(1) }`：
+     那会把整个视口（含缓冲圈、测距线）一起灰掉，分析要素就没有视觉优先级了。
+
+   ── 三个参数各自的旋钮（数值是 2026-10-31 实测该地图的平均饱和度/亮度）──
+     grayscale(0~1)  去色比例。1 = 全灰（饱和度 0.0585→0.0165，−72%，
+                     剩下的彩色全部来自 POI 图钉）；0.85 会留一点色（−61%）
+     brightness(1±)  >1 提亮。1.04→亮度 199.8；1.12→203.1；1.16→202.8
+     contrast(0~)    <1 压平层次（显"雾"）。0.96→标准差 43.3；
+                     0.90→40.5；0.85→38.4（数值越小画面越平）
+     ★ 别用 sepia 想"让它暖一点"：实测 sepia(.1) 会把饱和度从 0.0165
+       抬到 0.0493（−16%），看起来就不灰了。
+
+   想更"退后"：brightness 提到 1.10~1.14、contrast 降到 0.90~0.92
+   想更"利落"：contrast 提到 1.0~1.05、brightness 保持 1.02
+*/
+#map.is-analysis .ol-layer-base {
+  filter: grayscale(1) brightness(0.90) contrast(1.06);
+}
+
+/* 灰底上用鼠标画东西时，光标要表明"现在点在图上是有动作的" */
+#map.is-analysis {
+  cursor: crosshair;
+}
