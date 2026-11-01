@@ -15,8 +15,9 @@ import 'ol/ol.css';
 import { fromLonLat } from 'ol/proj'; //坐标转换
 
 import { onMounted, onBeforeUnmount, watch } from 'vue';
-import { createAdminLayer, createPOILayer } from '@/map/wms';
+import { createAdminLayer, createPOILayer, createHeatLayer } from '@/map/wms';
 import { createBaseSource, createAnnoSource } from '@/map/basemaps';
+import { HEAT_LAYER, heatStyleName } from '@/map/heatmap';
 
 import { watchController, stopAll } from '@/watchControl/watchController';
 import { useLayerStore } from '@/stores/layers.js';
@@ -87,6 +88,7 @@ const view = new View({
 let map = null; //别放进ref OL实例不进响应式
 let clickKey = null;
 let drawing = null; // 绘制控制器（分析模式才有内容）
+let heatLayer = null; // 热力图层（类别切换时要 updateParams）
 
 /**
  * 把 store 里的「工具 / 半径 / 中心」同步到绘制控制器。
@@ -139,12 +141,24 @@ onMounted(() => {
     'admin',
     BASE_LAYER_CLASS, // ★ 区划也跟着变灰：它是"地图的一部分"，不灰就永远看着彩色
   );
+  // ★ 热力层必须建在 POI 之前：
+  //   同 zIndex 时 OL 按「加入顺序」决定压盖，后加的在上面。
+  //   热力图是"面"、POI 是"点"，点必须浮在面之上，否则图钉被半透明色块压暗。
+  heatLayer = createHeatLayer(
+    map,
+    CONFIG.WMS_URL,
+    HEAT_LAYER,
+    'heat',
+    heatStyleName(layerStore.heatCategory),
+    BASE_LAYER_CLASS, // ★ 跟底图一起变灰：分析模式下不该和红色缓冲圈抢视觉
+  );
   const poiLayer = createPOILayer(map, CONFIG.WMS_URL, 'wuhan:poi', 'poi');
 
   watchController([
     { id: 'base', layer: baseLayer },
     { id: 'anno', layer: annoLayer },
     { id: 'admin', layer: adminLayer },
+    { id: 'heat', layer: heatLayer },
     { id: 'poi', layer: poiLayer },
   ]);
 
@@ -210,10 +224,30 @@ watch(
   },
 );
 
+/**
+ * 热力图类别切换：只改 WMS 的 STYLES 参数，不重建图层。
+ *
+ * ★ 用 updateParams 而不是 setSource：
+ *   updateParams 只重发一次 GetMap 请求，且是「合并」——LAYERS / TRANSPARENT
+ *   等其它参数原样保留；setSource 会重建整个 source，视觉上会闪一下白，
+ *   瓦片缓存也全丢。
+ * ★ 必须先判空：watcher 建立得比 onMounted 早，
+ *   如果用户在图层建好前就切了类别（比如刷新时恢复了上次的选择），会报
+ *   "Cannot read properties of null (reading 'getSource')"。
+ */
+watch(
+  () => layerStore.heatCategory,
+  (key) => {
+    if (!heatLayer) return;
+    heatLayer.getSource().updateParams({ STYLES: heatStyleName(key) });
+  },
+);
+
 onBeforeUnmount(() => {
   unByKey(clickKey);
   drawing?.destroy(); // 摘掉绘制交互和图形层
   drawing = null;
+  heatLayer = null;
   stopAll(); //解除所有图层的watch
   emit('ready', null); // 通知父组件地图已销毁
   map?.setTarget(undefined); // 官方释放方式

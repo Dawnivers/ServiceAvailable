@@ -17,7 +17,9 @@
  *     tag: string,           // 右侧小灰字（底图 / WMS / 16,016）
  *     visible: boolean,      // 勾选状态（由父组件持有，不要在子组件内部改）
  *     opacity: number|null,  // null = 不显示滑杆；0~1 = 显示滑杆
- *     chips: [{ label, count, color }]  // 可选：颜色小标签
+ *     chips: [{ label, count, color }]  // 可选：颜色小标签（只展示，不可点）
+ *     options: [{ key, label }],        // 可选：可点的单选按钮（热力图类别）
+ *     selected: string,                 // 可选：当前选中的 option key
  *   }
  */
 
@@ -31,11 +33,17 @@ const props = defineProps({
   showCount: { type: Boolean, default: true },
 })
 
-const emit = defineEmits(['toggle', 'opacity-change'])
+const emit = defineEmits(['toggle', 'opacity-change', 'option-pick'])
 
 /** 勾选框：只上报"我想要什么"，不在这里改数据 */
 function onToggle(layer) {
   emit('toggle', layer.id, !layer.visible)
+}
+
+/** 类别单选（热力图）：点已选中的那个不做任何事，避免白重发一次 GetMap */
+function onOption(layer, key) {
+  if (layer.selected === key) return
+  emit('option-pick', layer.id, key)
 }
 
 /** 透明度滑杆：input 事件 = 拖动中连续触发（实时预览） */
@@ -120,6 +128,24 @@ function ratio(layer) {
         >
           {{ c.label }} {{ c.count.toLocaleString() }}
         </span>
+      </div>
+
+      <!-- 可点的类别单选（热力图）：只在图层开启时出现，
+           关着的时候显示一排按钮反而让人以为已经生效了 -->
+      <div
+        v-if="layer.options && layer.options.length && layer.visible"
+        class="lp-options"
+      >
+        <button
+          v-for="o in layer.options"
+          :key="o.key"
+          type="button"
+          class="lp-opt"
+          :class="{ 'is-on': o.key === layer.selected }"
+          @click.stop="onOption(layer, o.key)"
+        >
+          {{ o.label }}
+        </button>
       </div>
     </div>
   </div>
@@ -285,5 +311,36 @@ function ratio(layer) {
   border-radius: 10px;
   color: #fff;
   white-space: nowrap;
+}
+
+/* ── 类别单选（热力图）──────────────────── */
+.lp-options {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  margin: 8px 0 2px 24px; /* 和 chips 对齐 */
+}
+.lp-opt {
+  font-size: 10.5px;
+  line-height: 1.5;
+  padding: 2px 8px;
+  border-radius: 10px;
+  border: 1px solid #dde5ec;
+  background: #fff;
+  color: #5b7286;
+  font-family: inherit;
+  cursor: pointer;
+  white-space: nowrap;
+  transition: background 0.12s, border-color 0.12s, color 0.12s;
+}
+.lp-opt:hover {
+  border-color: #b7c7d6;
+  background: #f7fafd;
+}
+/* 选中态：实心蓝，和勾选框用同一个主色 */
+.lp-opt.is-on {
+  border-color: #1565c0;
+  background: #1565c0;
+  color: #fff;
 }
 </style>

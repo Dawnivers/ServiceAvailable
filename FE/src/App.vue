@@ -220,11 +220,22 @@ const layers = computed(() =>
     visible: store.visible[d.id],
     opacity: d.kind === 'wms' ? store.opacity[d.id] : null,
     chips: d.chips,                        // 只有 poi 有
+    options: d.options,                    // 只有 heat 有（可点的类别单选）
+    selected: d.id === 'heat' ? store.heatCategory : undefined,
   }))
 )
 
 const onToggle = (id, next) => store.toggle(id, next) //切换显隐
 const onOpacityChange = (id, v) => store.setOpacity(id, v)  //切换透明
+
+/**
+ * 热力图类别切换（全部/学校/医院/商场/公园）。
+ * ★ 只改 store，地图上的 STYLES 由 mapView 里的 watch → updateParams 完成。
+ *   组件不做请求、不碰图层，保持「面板只上报意图」的分工。
+ */
+const onOptionPick = (id, key) => {
+  if (id === 'heat') store.setHeatCategory(key)
+}
 </script>
 
 <template>
@@ -244,6 +255,7 @@ const onOpacityChange = (id, v) => store.setOpacity(id, v)  //切换透明
     :layers="layers"
     @toggle="onToggle"
     @opacity-change="onOpacityChange"
+    @option-pick="onOptionPick"
   />
   <AnalysisToolbar
     v-else
@@ -283,8 +295,14 @@ const onOpacityChange = (id, v) => store.setOpacity(id, v)  //切换透明
     @nearby-analysis="onNearbyAnalysis"
   />
 
-  <!-- 左下：图例 -->
-  <MapLegend />
+  <!-- 左下：图例。
+       ★ 模式跟着热力图开关走，不能两个图例并排 ——
+         POI 图例是「类别→颜色」，热力图例是「数值→颜色」，
+         同时出现会让人以为"红=医院"和"红=密度高"是一回事。 -->
+  <MapLegend
+    :mode="store.visible.heat ? 'heat' : 'poi'"
+    :heat-key="store.heatCategory"
+  />
 
   <!-- 底部中：浏览模式是数据统计条，分析模式换成「请求 SQL」说明条 -->
   <MapStatsBar v-if="!analysis.active" />
