@@ -66,8 +66,45 @@ const onPick = (item) => {
 //    卡片进来 center 就是那个 POI（下一步可以直接算）
 // ════════════════════════════════════════════════════════════
 
+/**
+ * 进入分析模式前，热力图是开着的吗？
+ *
+ * ★ 为什么要记这一下：分析模式要看清 POI 图钉和红色缓冲圈，
+ *   热力图那张半透明色块会把两者都压暗，所以进来时让它让位（关掉、亮起 POI）。
+ *   但用户本来就是"看着热力图"点进来的，退出时应该还给他 —— 否则要重新勾一次。
+ *
+ * ★ 记在模块作用域而不是 store：它只在一次进出之间有效，
+ *   放进 store 反而会变成"持久化偏好"的假象。
+ */
+let heatBeforeAnalysis = false
+
+/**
+ * 统一进入：所有入口都走这里，避免两处入口行为不一致。
+ * @param {{ center?: { lon:number, lat:number, name?:string } }} [opts]
+ */
+function enterAnalysis(opts = {}) {
+  heatBeforeAnalysis = store.visible.heat
+  analysis.enter(opts)
+
+  // 热力图让位，POI 亮起（两者在 store 里互斥，先关热力再开 POI 顺序无所谓）
+  store.toggle('heat', false)
+  store.toggle('poi', true)
+}
+
+/** 统一退出：分析结束 → 复原进去前的图层状态 */
+function exitAnalysis() {
+  analysis.exit()
+
+  // 只有"进来时热力图是开的"才恢复；本来就没开就别多事
+  if (heatBeforeAnalysis) store.toggle('heat', true)
+  heatBeforeAnalysis = false
+}
+
 /** 入口一：顶栏「分析工具」——进/出切换 */
-const onToggleAnalysis = () => analysis.toggle()
+const onToggleAnalysis = () => {
+  if (analysis.active) exitAnalysis()
+  else enterAnalysis()
+}
 
 /**
  * 入口二：详情卡「附近分析」——带着该 POI 当圆心进来
@@ -75,14 +112,14 @@ const onToggleAnalysis = () => analysis.toggle()
  */
 const onNearbyAnalysis = (poi) => {
   if (!poi || poi.lon == null || poi.lat == null) return
-  analysis.enter({
+  enterAnalysis({
     center: { lon: poi.lon, lat: poi.lat, name: poi.name },
   })
   selection.clear()
 }
 
-/** 退出分析模式：地图、面板、顶栏一起复原 */
-const onExitAnalysis = () => analysis.exit()
+/** 退出分析模式：地图、面板、顶栏、图层一起复原 */
+const onExitAnalysis = () => exitAnalysis()
 
 // ════════════════════════════════════════════════════════════
 //  分析结果取数：中心 / 多边形 / 半径 一变就自动重查
