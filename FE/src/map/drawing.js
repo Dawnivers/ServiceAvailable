@@ -173,11 +173,30 @@ export function createDrawingController(map) {
 
     const c = fromLonLat([center.lon, center.lat]);
 
+    /**
+     * ★★ 3857 是等角投影：地图上的 1 米 ≠ 地面 1 米 ★★
+     *
+     *   缩放因子 = 1 / cos(纬度)。武汉 φ≈30.6°，cos≈0.861，
+     *   也就是「地图上 1 米」只对应地面 0.861 米。
+     *
+     *   后端是 ST_DWithin(geom::geography, 圆心, radius) —— 算的是**地面米**；
+     *   而 ol/geom/Circle 的半径单位是**投影米**。
+     *   若直接 new Circle(c, radius)：
+     *     650 m 的圆实际只画成 650×0.861 ≈ 560 m，
+     *     于是 606 m、626 m 这些"确实在 650 m 内"的设施会落在圆外，
+     *     看起来就像"圆画小了 / 数据和图不匹配"。
+     *
+     *   所以画的时候要放大 1/cos(纬度)，圆的**地面半径**才等于 radius。
+     *   （Web Mercator 是等角投影，局部各方向比例一致，
+     *     放大后仍然是圆，不会变成椭圆。）
+     */
+    const mapRadius = radius / Math.cos((center.lat * Math.PI) / 180);
+
     source.addFeature(
       new Feature({
         kind: 'circle',
         label: `缓冲区 ${Math.round(radius)} m`,
-        geometry: new Circle(c, radius),
+        geometry: new Circle(c, mapRadius),
       }),
     );
     source.addFeature(new Feature({ kind: 'center', geometry: new Point(c) }));
