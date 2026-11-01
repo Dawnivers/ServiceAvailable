@@ -736,7 +736,7 @@ Content-Type: application/json
 
 ### 2.4.11 G2：`grid_total` SLD 与两个渲染坑（2026-11-01 完成）
 
-样式源文件：[`styles/grid_total.sld`](../../../styles/grid_total.sld)，工作区样式名 `wuhan:grid_total`。
+样式源文件：[`styles/grid_total.sld`](../../../BE/styles/grid_total.sld)，工作区样式名 `wuhan:grid_total`。
 
 ![格网热力图（全市）](./img/grid-heatmap-city.png)
 
@@ -879,7 +879,7 @@ $bytes = [IO.File]::ReadAllBytes("stored.sld")
 Invoke-WebRequest "http://localhost:8080/geoserver/rest/workspaces/wuhan/styles/grid_total" `
   -Method PUT -Headers $h `
   -ContentType "application/vnd.ogc.sld+xml; charset=UTF-8" `
-  -Body ([IO.File]::ReadAllBytes("styles/grid_total.sld"))
+  -Body ([IO.File]::ReadAllBytes("BE/styles/grid_total.sld"))
 ```
 
 修完复查：存储版本变成**合法 UTF-8**（6,255 字节，GeoServer 会重新序列化并丢掉注释，
@@ -899,7 +899,7 @@ Invoke-WebRequest "http://localhost:8080/geoserver/rest/workspaces/wuhan/styles/
 
 ### 2.4.12 G3：四张分类热力图（2026-11-01 完成）
 
-五个样式全部就位（`styles/*.sld` → 工作区样式 `wuhan:grid_*`）：
+五个样式全部就位（`BE/styles/*.sld` → 工作区样式 `wuhan:grid_*`）：
 
 | 样式名 | 判定字段 | 配色 | 阈值 | 可见档 |
 |---|---|---|---|---|
