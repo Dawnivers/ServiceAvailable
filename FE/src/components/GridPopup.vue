@@ -83,7 +83,7 @@ const visible = computed(
 
     <!-- ═══ 加载 / 提示 / 错误 ═══ -->
     <div v-if="loading" class="state">正在查询本格…</div>
-    <div v-else-if="hint" class="state">{{ hint }}</div>
+    <div v-else-if="hint" class="state is-hint">{{ hint }}</div>
     <div v-else-if="error" class="state is-error">{{ error }}</div>
 
     <!-- ═══ 统计 ═══ -->
@@ -205,6 +205,17 @@ const visible = computed(
   padding: 18px 14px;
   font-size: 12.5px;
   color: #7d93a8;
+}
+/* 引导态：热力图刚打开、还没选格子时，告诉用户"这里可以点"。
+   用暖色左框而不是灰色文字 —— 它是唯一一次主动引导，需要被看见。 */
+.state.is-hint {
+  margin: 10px 14px 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border-left: 3px solid #f2994a;
+  background: #fff8ec;
+  color: #8a5a1e;
+  line-height: 1.65;
 }
 .state.is-error {
   color: #c62828;

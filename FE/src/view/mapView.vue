@@ -178,7 +178,7 @@ onMounted(() => {
       // ★ 低缩放下不给点：一格才 1–2 像素，而且还点不准。
       //   实测 zoom 9 时 GetFeatureInfo 返回的候选格子可能根本不在点击位置
       //   （101px 窗口有 30 km 宽，服务端按 FEATURE_COUNT 截断）。
-     //   与其返回错数据，不如提示放大。
+      //   与其返回错数据，不如提示放大。
       const zoom = map.getView().getZoom() ?? 0;
       if (zoom < MIN_GRID_ZOOM) {
         gridStore.setHint(
@@ -190,9 +190,12 @@ onMounted(() => {
       gridStore.setLoading(true);
       try {
         const props = await pickGrid(map, evt);
-        // 点在没有覆盖的格子上（透明区）→ props 为 null，收起卡片即可
-        if (props) gridStore.setInfo(props);
-        else gridStore.clear();
+        if (props) {
+          gridStore.setInfo(props);
+        } else {
+          // 点在格网范围外（市界之外）—— 回到引导态，别把卡片留成一片白
+          gridStore.setHint('这一下点在格网范围外，请点击彩色格子');
+        }
       } catch (e) {
         // 把 GeoServer 的真实报错留在控制台（例如 QUERY_LAYERS 不匹配），
         // 界面上只给一句人话，不把 XML 异常甩给用户。
@@ -286,17 +289,33 @@ registerWatcher(
 );
 
 /**
- * 热力图关掉 / 进分析模式时，收起「点格弹窗」。
+ * 点格卡片的「空态 / 清空」都由这一条 watcher 管。
  *
- * 不收的话会留一张卡片浮在 POI 模式上，读者会以为那格还被选中着。
- * 进分析模式也要收：那时右侧整块留给结果面板，且热力图本身已被关掉。
+ * 三件事：
+ *   ① 热力图关掉 或 进分析模式 → 清空（否则留一张卡片浮在 POI 模式上，
+ *      读者会以为那格还被选中着；分析模式下右侧整块要给结果面板）
+ *   ② 热力图刚打开、还没选格子 → 立刻弹一张**引导卡**
+ *      （不提示的话没人知道格网可以点，点选交互等于藏起来了）
+ *   ③ 用户点了格网范围外的空白 → 回到引导态，而不是留一片白
+ *
+ * ★ 依赖里带 hasInfo：点中格子后 hasInfo 变 true，这条 watcher 会被触发一次，
+ *   但因为 info 已存在，两个分支都不动作 —— 不会把刚点出来的卡片又清掉。
  */
 registerWatcher(
-  'gridClear',
-  () => [layerStore.visible.heat, analysis.active],
-  ([heatOn, analyzing]) => {
-    if (!heatOn || analyzing) gridStore.clear();
+  'gridState',
+  () => [layerStore.visible.heat, analysis.active, gridStore.hasInfo],
+  ([heatOn, analyzing, hasInfo]) => {
+    if (!heatOn || analyzing) {
+      gridStore.clear();
+      return;
+    }
+    if (!hasInfo) {
+      gridStore.setHint('点击任意格子，查看该格 800 m 步行圈内的设施统计');
+    }
   },
+  // immediate：万一将来做了「记住上次图层状态」，进来就是开着热力图，
+  // 也要立刻出引导卡；初始 heatOn=false 时这个回调只是清空，无害。
+  { immediate: true },
 );
 
 onBeforeUnmount(() => {
