@@ -102,6 +102,61 @@ function hintStyle(text) {
   return [new Style({ text: label(text, -18) })];
 }
 
+// ════════════════════════════════════════════════════════════
+//  选中态样式
+//
+//  ★ 与悬停必须一眼分开：悬停是"临时指示"（深墨 + 白），
+//    选中是"已经定下来的对象"（主色实线 + 常驻标签）。
+//    两者可以同时存在（选中 A 格，鼠标划过 B 格），所以各自一个图层。
+// ════════════════════════════════════════════════════════════
+
+/** 选中标签：主色底 + 白字，和悬停的深色药丸区分 */
+function selectedLabel(text, offsetY) {
+  return new Text({
+    text,
+    font: '700 12px "Microsoft YaHei", "Segoe UI", sans-serif',
+    offsetY,
+    overflow: true,
+    fill: new Fill({ color: '#ffffff' }),
+    backgroundFill: new Fill({ color: ACCENT }),
+    padding: [4, 9, 3, 9],
+  });
+}
+
+/** 选中格子：主色实线 + 白内衬 + 略强填充 */
+function gridSelectedStyle(labelText) {
+  return [
+    new Style({
+      stroke: new Stroke({ color: 'rgba(255, 255, 255, 0.95)', width: 6 }),
+      fill: new Fill({ color: 'rgba(21, 101, 192, 0.16)' }),
+    }),
+    new Style({
+      stroke: new Stroke({ color: ACCENT, width: 3 }),
+      text: labelText ? selectedLabel(labelText, -2) : undefined,
+    }),
+  ];
+}
+
+/** 选中 POI：比悬停大一圈的实心主色圆环 */
+function poiSelectedStyle(labelText) {
+  return [
+    new Style({
+      image: new CircleStyle({
+        radius: 18,
+        stroke: new Stroke({ color: 'rgba(255, 255, 255, 0.98)', width: 7 }),
+      }),
+    }),
+    new Style({
+      image: new CircleStyle({
+        radius: 18,
+        stroke: new Stroke({ color: ACCENT, width: 3.5 }),
+        fill: new Fill({ color: 'rgba(21, 101, 192, 0.20)' }),
+      }),
+      text: labelText ? selectedLabel(labelText, -30) : undefined,
+    }),
+  ];
+}
+
 const geoJson = new GeoJSON();
 
 /**
@@ -162,6 +217,49 @@ export function createHoverController(map, options = {}) {
   });
 
   map.addLayer(layer);
+
+  /**
+   * 选中层：和悬停层分开。
+   * ★ 必须分开 —— 用户可能"选中 A 格，鼠标划过 B 格"，
+   *   共用一个 source 的话，悬停清场会把选中一起擦掉。
+   */
+  const selSource = new VectorSource();
+  const selLayer = new VectorLayer({
+    source: selSource,
+    zIndex: 91, // 压在高亮层之上：选中比悬停"更重"
+    className: 'ol-select',
+    updateWhileInteracting: false,
+  });
+  map.addLayer(selLayer);
+
+  /** 当前选中的要素（{ id, geometry, properties }）与它属于哪一类 */
+  let selectedHit = null;
+  let selectedKind = null; // 'grid' | 'poi'
+
+  /** 选中要素上挂的标签文字 */
+  function selectedText(hit, kind) {
+    return kind === 'poi'
+      ? String(hit.properties?.name ?? '').slice(0, LABEL_MAX)
+      : gridLabel(hit.properties);
+  }
+
+  /** 重画选中要素（类别切换后标签文字会变，也要重画） */
+  function drawSelected() {
+    selSource.clear();
+    if (!selectedHit || !selectedHit.geometry) return;
+    let geom;
+    try {
+      geom = geoJson.readGeometry(selectedHit.geometry);
+    } catch {
+      return;
+    }
+    const f = new Feature({ geometry: geom });
+    const text = selectedText(selectedHit, selectedKind);
+    f.setStyle(
+      selectedKind === 'poi' ? poiSelectedStyle(text) : gridSelectedStyle(text),
+    );
+    selSource.addFeature(f);
+  }
 
   /** 'grid' | 'poi' | null —— 只记录"上一次算出来的模式"，用来判断要不要清场 */
   let mode = null;
@@ -309,6 +407,34 @@ export function createHoverController(map, options = {}) {
       currentMode();
     },
 
+    /**
+     * 设定"选中"对象（点击后调用）。
+     * @param {{ id: string|null, geometry: object, properties: object }|null} hit
+     * @param {'grid'|'poi'} [kind] 不传则用当前模式
+     */
+    setSelected(hit, kind) {
+      if (!hit || !hit.geometry) {
+        selectedHit = null;
+        selectedKind = null;
+        selSource.clear();
+        return;
+      }
+      selectedHit = hit;
+      selectedKind = kind ?? mode ?? 'grid';
+      drawSelected();
+    },
+
+    clearSelected() {
+      selectedHit = null;
+      selectedKind = null;
+      selSource.clear();
+    },
+
+    /** 类别切换后标签数字会变，重画一次（几何不用重新请求） */
+    refreshSelected() {
+      if (selectedHit) drawSelected();
+    },
+
     destroy() {
       if (timer) clearTimeout(timer);
       timer = null;
@@ -317,7 +443,9 @@ export function createHoverController(map, options = {}) {
       mode = null;
       if (target) target.style.cursor = '';
       source.clear();
+      selSource.clear();
       map.removeLayer(layer);
+      map.removeLayer(selLayer);
     },
   };
 }

@@ -27,8 +27,8 @@ import {
 import { useLayerStore } from '@/stores/layers.js';
 import { useAnalysisStore } from '@/stores/analysis.js';
 
-import { pickGid } from '@/map/clickToGid';
-import { pickGrid, MIN_GRID_ZOOM } from '@/map/gridInfo';
+import { pickPoi } from '@/map/clickToGid';
+import { pickGridFeature, MIN_GRID_ZOOM } from '@/map/gridInfo';
 import { createHoverController } from '@/map/hover';
 import { useSelectionStore } from '@/stores/selection.js';
 import { useGridStore } from '@/stores/grid.js';
@@ -53,6 +53,7 @@ const CONFIG = {
 const layerStore = useLayerStore();
 const analysis = useAnalysisStore();
 const gridStore = useGridStore();
+const selectionStore = useSelectionStore();
 
 // ★ className 是 OL 图层的正规选项（默认 'ol-layer'）。
 //   给底图/注记/区划挂同一个类，CSS 就能只对它们做 grayscale，
@@ -179,7 +180,7 @@ onMounted(() => {
   });
 
   //点击图像，将点击到的poi属性存入仓库
-  const selection = useSelectionStore();
+  const selection = selectionStore;
 
   clickKey = map.on('singleclick', async (evt) => {
     // ★ 分析模式下不查任何详情：
@@ -206,12 +207,16 @@ onMounted(() => {
 
       gridStore.setLoading(true);
       try {
-        const props = await pickGrid(map, evt);
-        if (props) {
-          gridStore.setInfo(props);
+        // ★ 用 pickGridFeature 而不是 pickGrid：选中态要画边框，
+        //   需要 geometry；只拿 properties 画不出来。
+        const hit = await pickGridFeature(map, evt);
+        if (hit) {
+          gridStore.setInfo(hit.properties);
+          hover?.setSelected(hit, 'grid'); // 选中：常驻主色边框
         } else {
           // 点在格网范围外（市界之外）—— 回到引导态，别把卡片留成一片白
           gridStore.setHint('这一下点在格网范围外，请点击彩色格子');
+          hover?.clearSelected();
         }
       } catch (e) {
         // 把 GeoServer 的真实报错留在控制台（例如 QUERY_LAYERS 不匹配），
@@ -222,9 +227,17 @@ onMounted(() => {
       return;
     }
 
-    const gid = await pickGid(map, evt);
-    if (gid === null) selection.clear();
-    else selection.setPoi(gid);
+    // POI 分支：同样要拿整条要素，选中态才能画光圈
+    const hit = await pickPoi(map, evt);
+    const gid = hit?.id ? Number(String(hit.id).split('.').pop()) : null;
+
+    if (gid === null || !Number.isInteger(gid)) {
+      selection.clear();
+      hover?.clearSelected();
+    } else {
+      selection.setPoi(gid);
+      hover?.setSelected(hit, 'poi');
+    }
   });
 
   // 地图就绪后通知父组件（比例尺组件需要 map 实例）
@@ -239,17 +252,46 @@ onMounted(() => {
 //       要临时停某一个也用 stopById(标签)，不用满文件找。
 
 /**
- * 悬停模式的"清场"信号。
+ * 悬停/选中的"清场"信号。
  *
  * ★ 模式本身不需要同步 —— hover 内部每次 pointermove 会现读 resolve()。
- *   这里只做一件事：状态突变时立刻擦掉残留的高亮
+ *   这里只做一件事：状态突变时立刻擦掉残留的高亮与选中框
  *   （比如正悬停着一个光圈就点「分析工具」，不能让圈留在那儿）。
  */
 registerWatcher(
   'hoverReset',
   () => [analysis.active, layerStore.visible.heat, layerStore.visible.poi],
-  () => hover?.reset(),
+  ([analyzing, heatOn, poiOn]) => {
+    hover?.reset();
+    // 关热力图 / 进分析模式 → 选中框也该收掉，否则会浮在一张不相干的图上
+    if (analyzing || (!heatOn && !poiOn)) hover?.clearSelected();
+  },
 );
+
+/**
+ * 格子卡被清空（点空白 / 点 ✕ / 切走）→ 收掉格子选中框。
+ * ★ 只在热力图可见时生效：POI 模式下 hasInfo 恒为 false，
+ *   不加这个条件会把 POI 的选中光圈一起擦掉。
+ */
+registerWatcher(
+  'gridSelection',
+  () => [layerStore.visible.heat, gridStore.hasInfo],
+  ([heatOn, hasInfo]) => {
+    if (heatOn && !hasInfo) hover?.clearSelected();
+  },
+);
+
+/**
+ * POI 详情卡被关掉（selection.poi 变 null）→ 收掉 POI 选中光圈。
+ *
+ * ★ store 里存的是 `poi` 对象，没有 `gid` 字段 —— 别照直觉写 selection.gid，
+ *   那样 watcher 永远取到 undefined，一次都不会触发。
+ * ★ 加 `visible.poi` 条件：热力图模式下 selection 本来就是空的，
+ *   不加这一层，点格子时前面的 selection.clear() 会把刚设好的格子选中框擦掉。
+ */
+registerWatcher('poiSelection', () => selectionStore.poi, (poi) => {
+  if (!poi && layerStore.visible.poi) hover?.clearSelected();
+});
 
 registerWatcher(
   'base',
@@ -315,6 +357,8 @@ registerWatcher(
   (key) => {
     if (!heatLayer) return;
     heatLayer.getSource().updateParams({ STYLES: heatStyleName(key) });
+    // 选中框上的标签也要跟着换数字（选了学校就显示 19，不是 176）
+    hover?.refreshSelected();
   },
 );
 
