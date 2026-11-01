@@ -1,6 +1,7 @@
 import VectorLayer from 'ol/layer/Vector.js';
 import VectorSource from 'ol/source/Vector.js';
 import Feature from 'ol/Feature.js';
+import Point from 'ol/geom/Point.js';
 import GeoJSON from 'ol/format/GeoJSON.js';
 import { Style, Stroke, Fill, Circle as CircleStyle, Text } from 'ol/style.js';
 import { unByKey } from 'ol/Observable.js';
@@ -85,6 +86,11 @@ function poiStyle(labelText) {
   ];
 }
 
+/** 只有文字、没有图形的提示样式（低缩放时用） */
+function hintStyle(text) {
+  return [new Style({ text: label(text, -18) })];
+}
+
 const geoJson = new GeoJSON();
 
 /**
@@ -148,9 +154,23 @@ export function createHoverController(map) {
     timer = null;
     if (!mode || !lastCoord || inFlight) return;
 
-    // 热力图在低缩放下格太小（一格不到 2 px），探针会返回错格子，直接不查
+    // 热力图在低缩放下格太小（一格不到 2 px），探针会返回错格子，直接不查。
+    // ★ 但不能静默什么都不做 —— 用户只会觉得"悬停失灵"。
+    //   这里在光标旁浮一句提示，告诉他为什么没有高亮。
+    //   提示要跟着光标走：复用同一个 Feature，只改坐标，不重建样式。
     if (mode === 'grid' && (map.getView().getZoom() ?? 0) < MIN_GRID_ZOOM) {
-      clear();
+      lastId = '__hint__';
+      const existing = source.getFeatures()[0];
+      if (existing && existing.get('__hint')) {
+        existing.getGeometry().setCoordinates(lastCoord);
+      } else {
+        const tip = new Feature({ geometry: new Point(lastCoord) });
+        tip.set('__hint', true);
+        tip.setStyle(hintStyle(`放大到 z${MIN_GRID_ZOOM} 才能选格子`));
+        source.clear();
+        source.addFeature(tip);
+      }
+      if (target) target.style.cursor = '';
       return;
     }
 
