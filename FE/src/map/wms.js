@@ -26,6 +26,14 @@ export function createAdminLayer(map, url, layer, id, className) {
   return adminLayer
 }
 
+/**
+ * 创建 POI 图层（wuhan:poi）。
+ *
+ * ★ 故意不挂 className: 'ol-layer-base'：
+ *   分析模式下底图/注记/区划一起变灰，POI 图钉必须保持彩色，
+ *   否则"灰底 + 灰点"看不出设施分布，红色缓冲圈也没有对比。
+ *   （见 roadmap §2.4.1「地图变灰但分析要素突出」）
+ */
 export function createPOILayer(map, url, layer,id) {
   const poiLayer = new ImageLayer({
     properties: { id: id },
@@ -42,7 +50,6 @@ export function createPOILayer(map, url, layer,id) {
       ratio: 1.5, //流畅度
     }),
     opacity: 1.0, //透明度
-    className: 'ol-layer-base'
   });
   map.addLayer(poiLayer);
   return poiLayer
