@@ -736,7 +736,7 @@ Content-Type: application/json
 
 ### 2.4.11 G2：`grid_total` SLD 与两个渲染坑（2026-11-01 完成）
 
-样式源文件：[`styles/grid_total.sld`](../../../BE/styles/grid_total.sld)，工作区样式名 `wuhan:grid_total`。
+样式源文件：[`BE/styles/grid_total.sld`](../../BE/styles/grid_total.sld)，工作区样式名 `wuhan:grid_total`。
 
 ![格网热力图（全市）](./img/grid-heatmap-city.png)
 
