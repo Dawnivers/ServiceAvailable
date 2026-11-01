@@ -171,8 +171,7 @@ onMounted(() => {
 
     // ★ 热力图优先：它开着的时候用户点的是"面"（格子），不是"点"（设施）。
     //   两者在 store 里互斥，所以不会冲突；写成热力优先是为了表达意图。
-    //   pickGrid 内部会再判一次图层可见性 —— 图层不可见时
-    //   getFeatureInfoUrl 拿不到出图 bbox，URL 会是 undefined。
+    //   pickGrid 内部会再判一次图层可见性（看不见格子就别弹卡片）。
     if (layerStore.visible.heat) {
       selection.clear(); // 别让 POI 卡和格子卡同时存在
       gridStore.setLoading(true);

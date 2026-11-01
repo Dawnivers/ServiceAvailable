@@ -14,9 +14,20 @@ import { HEAT_LAYER } from './heatmap';
  *   WFS 要序列化成 GeoJSON 几百 KB 起步，还得前端自己判断点落在哪个面里。
  *   GetFeatureInfo 只回 1 个要素、约 700 字节。
  *
- * ★ getFeatureInfoUrl 会自动带上出图那次的 BBOX / WIDTH / HEIGHT，
- *   并把经纬度换成像素坐标 —— 连 source 的 ratio(1.5) 也按图片实际尺寸处理，
- *   不用自己乘。手写这条 URL 时最容易漏的就是这一步。
+ * ★ getFeatureInfoUrl 不用你自己算像素。它的做法（ol/source/wms.js:218）是：
+ *     以「点击坐标 + 当前 resolution」构造一个 101×101 像素的查询窗口
+ *     （常量 GETFEATUREINFO_IMAGE_SIZE = [101, 101]），现推 BBOX / WIDTH / HEIGHT，
+ *     再把点击点换算成窗口内的 X/Y —— 因为居中，恒为 (50, 50)。
+ *
+ *   所以两个常见误解要说清：
+ *     · 与图层上一次出图的 bbox 无关。它不读 source 的缓存，
+ *       哪怕图层从没请求过图，也能拼出一条合法 URL。
+ *     · 与 source 的 ratio(1.5) 无关。ratio 只影响 GetMap 出的图多大，
+ *       而这里的 width/height 恒为 101×101，由 resolution 推出来，不用乘 1.5。
+ *
+ *   resolution 在这里的唯一作用：把「地图单位」换算成「像素」
+ *     x = (coordX - bboxLeft) / resolution
+ *     y = (bboxTop - coordY) / resolution
  * ════════════════════════════════════════════════════════════
  */
 
@@ -38,9 +49,10 @@ export const pickGrid = async (map, evt) => {
     .getArray()
     .find((l) => l.get('id') === 'heat');
 
-  // 图层没建 / 没打开时不要发请求：
-  //   getFeatureInfoUrl 依赖 source 上一次出图的 bbox，
-  //   图层不可见时那片区域根本没请求过，URL 会是 undefined
+  // 图层没建 / 没打开时不发请求。
+  // ★ 技术上 getFeatureInfoUrl 在图层不可见时照样能拼出 URL（它只看坐标和
+  //   resolution，不依赖上次出图）。这里主动跳过是产品决定：
+  //   用户看不见格子却点了弹出卡片，会以为界面错乱。
   if (!heatLayer || !heatLayer.getVisible()) return null;
 
   const source = heatLayer.getSource();
