@@ -103,5 +103,6 @@ export const probeFeature = async (map, evt, layerId, extra = {}, opts = {}) => 
     id: hit.id ?? null, // 形如 "grid_500m.16822" / "poi.963"，悬停去重用
     geometry: hit.geometry ?? null, // GeoJSON，坐标已在 view 投影下
     properties: hit.properties ?? {},
+    url, // 便于把这条请求单独拿出来复现（调试用）
   };
 };

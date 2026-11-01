@@ -5,6 +5,7 @@ import Point from 'ol/geom/Point.js';
 import GeoJSON from 'ol/format/GeoJSON.js';
 import { Style, Stroke, Fill, Circle as CircleStyle, Text } from 'ol/style.js';
 import { unByKey } from 'ol/Observable.js';
+import { fromLonLat } from 'ol/proj.js';
 import { probeFeature } from './probe.js';
 import { MIN_GRID_ZOOM } from './gridInfo.js';
 
@@ -31,6 +32,15 @@ import { MIN_GRID_ZOOM } from './gridInfo.js';
 const THROTTLE_MS = 90; // 时间锁
 const MIN_PIXEL_MOVE = 5; // 位移锁（像素）
 const LABEL_MAX = 12; // 标签最多几个字，超了截断
+
+/**
+ * ★ 悬停的两种「模式」与图层 id 并不相同：
+ *     模式 'grid'  → 图层 'heat'（wuhan:grid_500m）
+ *     模式 'poi'   → 图层 'poi'
+ *   这里必须显式映射。曾经直接把 mode 当图层 id 传进探针，
+ *   POI 因为两者同名侥幸能用，热力图则永远查不到图层 → 静默返回 null。
+ */
+const LAYER_OF = { grid: 'heat', poi: 'poi' };
 
 // ── 配色（与全站主色一致：深蓝 #17334d / 蓝 #1565C0）──────────
 const INK = 'rgba(16, 42, 67, '; // 深墨蓝，拼透明度用
@@ -215,7 +225,7 @@ export function createHoverController(map, options = {}) {
       const hit = await probeFeature(
         map,
         { coordinate: lastCoord },
-        mode,
+        LAYER_OF[mode], // ★ 必须是图层 id（heat/poi），不能直接传 mode（grid/poi）
         mode === 'poi'
           ? { QUERY_LAYERS: 'wuhan:poi', FI_POINT_TOLERANCE: 8 }
           : { QUERY_LAYERS: 'wuhan:grid_500m', FI_POINT_TOLERANCE: 0, FEATURE_COUNT: 4 },
