@@ -28,7 +28,9 @@ import { useLayerStore } from '@/stores/layers.js';
 import { useAnalysisStore } from '@/stores/analysis.js';
 
 import { pickGid } from '@/map/clickToGid';
+import { pickGrid } from '@/map/gridInfo';
 import { useSelectionStore } from '@/stores/selection.js';
+import { useGridStore } from '@/stores/grid.js';
 import { unByKey } from 'ol/Observable.js';
 import { defaults } from 'ol/control/defaults.js';
 import { createDrawingController } from '@/map/drawing';
@@ -49,6 +51,7 @@ const CONFIG = {
 //    这里只按「当前 store.baseMap」建一份初始 source；切换时由下面的 watch 换源。
 const layerStore = useLayerStore();
 const analysis = useAnalysisStore();
+const gridStore = useGridStore();
 
 // ★ className 是 OL 图层的正规选项（默认 'ol-layer'）。
 //   给底图/注记/区划挂同一个类，CSS 就能只对它们做 grayscale，
@@ -162,9 +165,27 @@ onMounted(() => {
   const selection = useSelectionStore();
 
   clickKey = map.on('singleclick', async (evt) => {
-    // ★ 分析模式下不查 POI 详情：
-    //   这一下点击是"选分析中心"或"落测距点"，不是"看设施"
+    // ★ 分析模式下不查任何详情：
+    //   这一下点击是"选分析中心"或"落测距点"，不是"看设施/看格子"
     if (analysis.active) return;
+
+    // ★ 热力图优先：它开着的时候用户点的是"面"（格子），不是"点"（设施）。
+    //   两者在 store 里互斥，所以不会冲突；写成热力优先是为了表达意图。
+    //   pickGrid 内部会再判一次图层可见性 —— 图层不可见时
+    //   getFeatureInfoUrl 拿不到出图 bbox，URL 会是 undefined。
+    if (layerStore.visible.heat) {
+      selection.clear(); // 别让 POI 卡和格子卡同时存在
+      gridStore.setLoading(true);
+      try {
+        const props = await pickGrid(map, evt);
+        // 点在没有覆盖的格子上（透明区）→ props 为 null，收起卡片即可
+        if (props) gridStore.setInfo(props);
+        else gridStore.clear();
+      } catch (e) {
+        gridStore.setError('格子查询失败');
+      }
+      return;
+    }
 
     const gid = await pickGid(map, evt);
     if (gid === null) selection.clear();
@@ -246,6 +267,20 @@ registerWatcher(
   (key) => {
     if (!heatLayer) return;
     heatLayer.getSource().updateParams({ STYLES: heatStyleName(key) });
+  },
+);
+
+/**
+ * 热力图关掉 / 进分析模式时，收起「点格弹窗」。
+ *
+ * 不收的话会留一张卡片浮在 POI 模式上，读者会以为那格还被选中着。
+ * 进分析模式也要收：那时右侧整块留给结果面板，且热力图本身已被关掉。
+ */
+registerWatcher(
+  'gridClear',
+  () => [layerStore.visible.heat, analysis.active],
+  ([heatOn, analyzing]) => {
+    if (!heatOn || analyzing) gridStore.clear();
   },
 );
 

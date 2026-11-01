@@ -6,11 +6,13 @@ import AnalysisToolbar from './components/AnalysisToolbar.vue';
 import AnalysisResult from './components/AnalysisResult.vue';
 import SqlHintBar from './components/SqlHintBar.vue';
 import PoiDetailCard from './components/PoiDetailCard.vue';
+import GridPopup from './components/GridPopup.vue';
 import MapLegend from './components/MapLegend.vue';
 import MapStatsBar from './components/MapStatsBar.vue';
 import MapScaleReadout from './components/MapScaleReadout.vue';
 import { useLayerStore } from './stores/layers.js';
 import { useSelectionStore } from './stores/selection.js';
+import { useGridStore } from './stores/grid.js';
 import {
   useAnalysisStore,
   TOOLS,
@@ -26,6 +28,7 @@ import { baseMapLabel } from './map/basemaps.js';
 
 const store = useLayerStore()
 const selection = useSelectionStore()
+const grid = useGridStore()
 const analysis = useAnalysisStore()
 
 // ★ 地图实例：用 shallowRef（不是 ref），配合 mapView 里的 emit('ready')
@@ -330,6 +333,17 @@ const onOptionPick = (id, key) => {
     :error="selection.error"
     @close="onCloseCard"
     @nearby-analysis="onNearbyAnalysis"
+  />
+
+  <!-- 右上：点击热力图格子的统计卡。
+       与 POI 卡共用同一个位置，但两者不会同时出现 ——
+       热力图与 POI 图层在 store 里互斥，点选逻辑也按热力图优先分叉。 -->
+  <GridPopup
+    v-if="!analysis.active"
+    :info="grid.info"
+    :loading="grid.loading"
+    :error="grid.error"
+    @close="grid.clear()"
   />
 
   <!-- 左下：图例。
