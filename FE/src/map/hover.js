@@ -95,13 +95,29 @@ const geoJson = new GeoJSON();
 
 /**
  * @param {import('ol/Map').default} map
+ * @param {{ resolve?: () => ('grid'|'poi'|null) }} [options]
+ *   resolve 由调用方提供，每次鼠标移动 / 每次探针前都会重新问一遍
+ *   「现在该查哪个图层」—— 不走 watcher，避免状态同步不上导致的静默失效。
  * @returns {{
- *   setMode: (m: 'grid'|'poi'|null) => void,
  *   clear: () => void,
+ *   reset: () => void,
  *   destroy: () => void,
  * }}
  */
-export function createHoverController(map) {
+export function createHoverController(map, options = {}) {
+  /**
+   * ★ 模式不靠 watcher 同步，而是**每次事件现读一次**。
+   *
+   *   原先用 registerWatcher 把 store → 'grid'|'poi' 推过来，但那是条
+   *   "多一次跳转"的链路：watcher 没触发 / 触发时 hover 还没建 / 顺序错开，
+   *   都会表现为"悬停完全没反应"，而且很难查。
+   *
+   *   这里改成 resolve() 回调，由 mapView 提供，直接读当前 store：
+   *     · 无状态可缓存 → 不存在"没同步上"这种 bug
+   *     · 一次 pointermove 里读一次，成本可忽略
+   */
+  const resolve = options.resolve ?? (() => null);
+
   const source = new VectorSource();
 
   const layer = new VectorLayer({
@@ -114,7 +130,7 @@ export function createHoverController(map) {
 
   map.addLayer(layer);
 
-  /** 'grid' | 'poi' | null */
+  /** 'grid' | 'poi' | null —— 只记录"上一次算出来的模式"，用来判断要不要清场 */
   let mode = null;
   let key = null; // pointermove 的监听句柄
   let timer = null; // 拖尾定时器
@@ -125,6 +141,24 @@ export function createHoverController(map) {
   let lastCoord = null; // 最近一次鼠标位置（拖尾时用）
 
   const target = map.getTargetElement();
+
+  /**
+   * 取当前模式，并在模式变化时清场。
+   * ★ 这是整个悬停的"唯一真相来源"：每次 pointermove / 每次 run() 都重新问一遍。
+   */
+  function currentMode() {
+    const next = resolve() ?? null;
+    if (next !== mode) {
+      mode = next;
+      lastPixel = null; // 换模式后重新开始算位移
+      lastId = null;
+      source.clear();
+      if (target) target.style.cursor = '';
+      // 开发期线索：悬停不灵时先看这行有没有打出来（生产构建会摇掉）
+      if (import.meta.env.DEV && next) console.info('[hover] 模式 →', next);
+    }
+    return mode;
+  }
 
   function clear() {
     if (source.getFeatures().length) source.clear();
@@ -152,7 +186,7 @@ export function createHoverController(map) {
 
   async function run() {
     timer = null;
-    if (!mode || !lastCoord || inFlight) return;
+    if (!currentMode() || !lastCoord || inFlight) return;
 
     // 热力图在低缩放下格太小（一格不到 2 px），探针会返回错格子，直接不查。
     // ★ 但不能静默什么都不做 —— 用户只会觉得"悬停失灵"。
@@ -212,10 +246,10 @@ export function createHoverController(map) {
   }
 
   function onMove(evt) {
-    if (!mode) return;
     if (evt.dragging) return; // 拖动地图时不查，否则一路狂发请求
 
     lastCoord = evt.coordinate;
+    if (!currentMode()) return; // 现在不该悬停（分析模式 / 图层都关了）
 
     const px = evt.pixel;
     if (lastPixel) {
@@ -237,16 +271,12 @@ export function createHoverController(map) {
   key = map.on('pointermove', onMove);
 
   return {
-    setMode(next) {
-      if (next === mode) return;
-      mode = next;
-      lastPixel = null;
-      lastId = null;
-      clear();
-      if (target) target.style.cursor = ''; // 交给下面的判定
-    },
-
     clear,
+
+    /** 供调用方在外部状态突变后（如进出分析模式）立刻清掉残留高亮 */
+    reset() {
+      currentMode();
+    },
 
     destroy() {
       if (timer) clearTimeout(timer);

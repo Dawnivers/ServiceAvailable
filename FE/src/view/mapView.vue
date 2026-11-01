@@ -165,8 +165,16 @@ onMounted(() => {
 
   // 悬停高亮：热力图格子描边 / POI 光圈 + 名称。
   // 它是 ImageLayer（位图）唯一能"有反馈"的办法 —— 探针问服务器要几何，再自己画。
-  hover = createHoverController(map);
-  syncHover(); // 初始模式要跟当前图层状态对齐（默认 POI 可见 → 'poi'）
+  // ★ 模式用 resolve 回调现读 store，不走 watcher：
+  //   少一次状态跳转，就不会出现"watcher 没触发 → 悬停全哑"这种难查的问题。
+  hover = createHoverController(map, {
+    resolve() {
+      if (analysis.active) return null; // 分析模式下鼠标是在选中心 / 量距离
+      if (layerStore.visible.heat) return 'grid';
+      if (layerStore.visible.poi) return 'poi';
+      return null;
+    },
+  });
 
   //点击图像，将点击到的poi属性存入仓库
   const selection = useSelectionStore();
@@ -229,27 +237,16 @@ onMounted(() => {
 //       要临时停某一个也用 stopById(标签)，不用满文件找。
 
 /**
- * 悬停模式：跟着「现在屏幕上能看见什么」走。
+ * 悬停模式的"清场"信号。
  *
- *   · 分析模式        → 关闭（这时鼠标是在选中心 / 量距离，不是看设施）
- *   · 热力图可见      → 'grid'（问格子，描一圈边框 + 显示总数）
- *   · 否则 POI 可见   → 'poi'（问设施，画光圈 + 显示名称）
- *   · 都不满足        → 关闭
- *
- * ★ 热力图与 POI 在 store 里互斥，所以这两个分支不会同时成立。
+ * ★ 模式本身不需要同步 —— hover 内部每次 pointermove 会现读 resolve()。
+ *   这里只做一件事：状态突变时立刻擦掉残留的高亮
+ *   （比如正悬停着一个光圈就点「分析工具」，不能让圈留在那儿）。
  */
-function syncHover() {
-  if (!hover) return;
-  if (analysis.active) hover.setMode(null);
-  else if (layerStore.visible.heat) hover.setMode('grid');
-  else if (layerStore.visible.poi) hover.setMode('poi');
-  else hover.setMode(null);
-}
-
 registerWatcher(
-  'hover',
+  'hoverReset',
   () => [analysis.active, layerStore.visible.heat, layerStore.visible.poi],
-  syncHover,
+  () => hover?.reset(),
 );
 
 registerWatcher(
