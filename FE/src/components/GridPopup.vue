@@ -14,6 +14,7 @@
 
 import { computed } from 'vue'
 import { GRID_CATEGORIES } from '@/map/gridInfo'
+import { heatCategory } from '@/map/heatmap'
 
 const CARD_W = 288 // 与 PoiDetailCard 一致
 
@@ -23,6 +24,13 @@ const props = defineProps({
   error: { type: String, default: null },
   /** 中性提示（不是错误），比如「先放大再点格子」 */
   hint: { type: String, default: null },
+  /**
+   * 当前热力图类别（heatmap.js 的 key）。
+   * 'total' 时展示总量 + 四类对比；选了某一类时**只算那一类**。
+   * ★ 切换类别不需要重新请求 —— GetFeatureInfo 一次就把四类全返回了，
+   *   这里只是换读哪个字段。
+   */
+  category: { type: String, default: 'total' },
 })
 
 defineEmits(['close'])
@@ -63,6 +71,37 @@ const rows = computed(() => {
 const visible = computed(
   () => props.loading || props.error || props.hint || props.info,
 )
+
+/**
+ * 当前类别 → 该读哪两个字段。
+ *
+ * heatmap.js 的类别里 field 有两种写法：
+ *   total/school/hospital/mall → 'r_xxx'（本身就是倍数）
+ *   park                       → 'park'（原始个数）
+ * 所以先去掉 r_ 得到计数字段，再拼回 r_ 得到倍数字段。
+ */
+const cat = computed(() => heatCategory(props.category))
+const countField = computed(() =>
+  cat.value.field.startsWith('r_') ? cat.value.field.slice(2) : cat.value.field,
+)
+const rField = computed(() => 'r_' + countField.value)
+const isTotal = computed(() => cat.value.key === 'total')
+
+/** 只看某一类时的聚焦数据 */
+const focus = computed(() => {
+  const meta = GRID_CATEGORIES.find((g) => g.key === cat.value.key)
+  const count = num(props.info?.[countField.value])
+  const tot = num(props.info?.total)
+  return {
+    key: cat.value.key,
+    label: meta?.label ?? cat.value.label,
+    color: meta?.color ?? '#e07012',
+    count,
+    multiple: num(props.info?.[rField.value]),
+    total: tot,
+    share: tot > 0 ? (count / tot) * 100 : 0,
+  }
+})
 </script>
 
 <template>
@@ -88,34 +127,58 @@ const visible = computed(
 
     <!-- ═══ 统计 ═══ -->
     <template v-else-if="info">
-      <!-- 大数字 -->
+      <!-- 大数字：全部类别看总量，选了某一类就只看那一类 -->
       <div class="hero">
-        <div class="hero-num">{{ total }}</div>
+        <div
+          class="hero-num"
+          :style="{ color: isTotal ? '#e07012' : focus.color }"
+        >
+          {{ isTotal ? total : focus.count }}
+        </div>
         <div class="hero-side">
-          <div class="hero-label">800 m 步行圈内设施</div>
+          <div class="hero-label">
+            {{ isTotal ? '800 m 步行圈内设施' : `800 m 步行圈内${focus.label}` }}
+          </div>
           <div class="hero-mul">
-            相对全市平均 <b>{{ rTotal.toFixed(1) }}×</b>
+            相对全市平均
+            <b>{{ (isTotal ? rTotal : focus.multiple).toFixed(1) }}×</b>
           </div>
         </div>
       </div>
 
-      <!-- 四条分类 -->
-      <ul class="rows">
-        <li v-for="r in rows" :key="r.key" class="row">
-          <span class="dot" :style="{ background: r.color }" />
-          <span class="row-label">{{ r.label }}</span>
-          <span class="row-count">{{ r.count }}</span>
-          <span class="bar">
-            <i :style="{ width: r.pct + '%', background: r.color }" />
+      <!-- 只看某一类：给出它在本格中的占比，不再铺四条 -->
+      <template v-if="!isTotal">
+        <div class="share">
+          <span class="share-dot" :style="{ background: focus.color }" />
+          <span class="share-text">
+            占本格全部 {{ focus.total }} 个设施的
+            <b>{{ focus.share.toFixed(1) }}%</b>
           </span>
-          <span class="row-mul">{{ r.multiple.toFixed(1) }}×</span>
-        </li>
-      </ul>
+        </div>
+        <p class="foot">
+          本卡只统计「{{ focus.label }}」。切到「全部」可看四类对比。
+        </p>
+      </template>
 
-      <p class="foot">
-        柱长按本格最大值归一；倍数 = 该格 ÷ 全市平均（1 = 平均）。
-        公园按个数着色，其余按倍数。
-      </p>
+      <!-- 全部：四条分类对比 -->
+      <template v-else>
+        <ul class="rows">
+          <li v-for="r in rows" :key="r.key" class="row">
+            <span class="dot" :style="{ background: r.color }" />
+            <span class="row-label">{{ r.label }}</span>
+            <span class="row-count">{{ r.count }}</span>
+            <span class="bar">
+              <i :style="{ width: r.pct + '%', background: r.color }" />
+            </span>
+            <span class="row-mul">{{ r.multiple.toFixed(1) }}×</span>
+          </li>
+        </ul>
+
+        <p class="foot">
+          柱长按本格最大值归一；倍数 = 该格 ÷ 全市平均（1 = 平均）。
+          公园按个数着色，其余按倍数。
+        </p>
+      </template>
     </template>
   </div>
 </template>
@@ -298,6 +361,29 @@ const visible = computed(
 .row-mul {
   text-align: right;
   color: #9aaec1;
+  font-variant-numeric: tabular-nums;
+}
+
+/* ═══ 只看某一类时的占比行 ═══ */
+.share {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin: 2px 14px 10px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  background: #f6f9fc;
+  font-size: 11.5px;
+  color: #5b7286;
+}
+.share-dot {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+}
+.share-text b {
+  color: #17334d;
   font-variant-numeric: tabular-nums;
 }
 

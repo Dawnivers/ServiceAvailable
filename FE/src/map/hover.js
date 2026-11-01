@@ -8,6 +8,7 @@ import { unByKey } from 'ol/Observable.js';
 import { fromLonLat } from 'ol/proj.js';
 import { probeFeature } from './probe.js';
 import { MIN_GRID_ZOOM } from './gridInfo.js';
+import { heatCategory } from './heatmap.js';
 
 /**
  * ════════════════════════════════════════════════════════════
@@ -104,6 +105,21 @@ function hintStyle(text) {
 const geoJson = new GeoJSON();
 
 /**
+ * 悬停标签取哪个数。
+ *
+ * ★ 必须跟当前热力图类别一致：
+ *   选「全部」→ 总设施数；选「学校」→ 只报学校数。
+ *   否则图上染的是学校色、标签却报 176（总数），读者会以为学校有 176 个。
+ */
+function gridLabelOf(properties, categoryKey) {
+  if (!properties) return '';
+  const c = heatCategory(categoryKey);
+  const field = c.field.startsWith('r_') ? c.field.slice(2) : c.field;
+  const n = properties[field];
+  return n == null ? '' : `${n} 个`;
+}
+
+/**
  * @param {import('ol/Map').default} map
  * @param {{ resolve?: () => ('grid'|'poi'|null) }} [options]
  *   resolve 由调用方提供，每次鼠标移动 / 每次探针前都会重新问一遍
@@ -127,6 +143,13 @@ export function createHoverController(map, options = {}) {
    *     · 一次 pointermove 里读一次，成本可忽略
    */
   const resolve = options.resolve ?? (() => null);
+  /** 当前热力图类别（'total' / 'school' / ...），同样每次现读，保证标签与配色一致 */
+  const category = options.category ?? (() => 'total');
+
+  /** 格子标签：跟着当前类别取数 */
+  function gridLabel(properties) {
+    return gridLabelOf(properties, category());
+  }
 
   const source = new VectorSource();
 
@@ -180,9 +203,7 @@ export function createHoverController(map, options = {}) {
     const labelText =
       mode === 'poi'
         ? String(hit.properties?.name ?? '').slice(0, LABEL_MAX)
-        : hit.properties?.total != null
-          ? `${hit.properties.total} 个`
-          : '';
+        : gridLabel(hit.properties);
 
     const geom = hit.geometry ? geoJson.readGeometry(hit.geometry) : null;
     if (!geom) return;

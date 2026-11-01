@@ -344,6 +344,7 @@ const onOptionPick = (id, key) => {
     :loading="grid.loading"
     :error="grid.error"
     :hint="grid.hint"
+    :category="store.heatCategory"
     @close="grid.clear()"
   />
 

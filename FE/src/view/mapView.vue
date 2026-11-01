@@ -174,6 +174,8 @@ onMounted(() => {
       if (layerStore.visible.poi) return 'poi';
       return null;
     },
+    // 悬停标签要跟热力图当前类别一致（全部 / 学校 / 医院 / 商场 / 公园）
+    category: () => layerStore.heatCategory,
   });
 
   //点击图像，将点击到的poi属性存入仓库
