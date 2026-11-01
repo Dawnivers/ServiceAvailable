@@ -14,12 +14,16 @@ import 'ol/ol.css';
 
 import { fromLonLat } from 'ol/proj'; //坐标转换
 
-import { onMounted, onBeforeUnmount, watch } from 'vue';
+import { onMounted, onBeforeUnmount } from 'vue';
 import { createAdminLayer, createPOILayer, createHeatLayer } from '@/map/wms';
 import { createBaseSource, createAnnoSource } from '@/map/basemaps';
 import { HEAT_LAYER, heatStyleName } from '@/map/heatmap';
 
-import { watchController, stopAll } from '@/watchControl/watchController';
+import {
+  watchController,
+  registerWatcher,
+  stopAll,
+} from '@/watchControl/watchController';
 import { useLayerStore } from '@/stores/layers.js';
 import { useAnalysisStore } from '@/stores/analysis.js';
 
@@ -64,19 +68,8 @@ const annoLayer = new TileLayer({
   source: createAnnoSource(layerStore.baseMap),
 });
 
-// 底图切换：一个值 → 两个图层同时换源
-//   ★ 必须成组换（vec 配 cva、img 配 cia），否则就是"影像图上叠矢量注记"
-//   ★ 不加 immediate：初始 source 在上面建图层时已经按当前 baseMap 建好了，
-//     加了会白建两轮 source、白发两轮瓦片请求
-//   ★ 用 setSource(新对象) 而不是 setUrl + refresh：
-//     新 source 的瓦片缓存天然干净，不会残留旧底图的瓦片
-watch(
-  () => layerStore.baseMap,
-  (kind) => {
-    baseLayer.setSource(createBaseSource(kind));
-    annoLayer.setSource(createAnnoSource(kind));
-  },
-);
+// 底图切换的监听不写在这里，统一登记在下方「6. 统一 watcher 注册」区，
+// 这样 onBeforeUnmount 的 stopAll() 能一次清干净。
 
 // ── 4. 地图 ──────────────────────────────────
 const view = new View({
@@ -183,20 +176,36 @@ onMounted(() => {
   emit('ready', map);
 });
 
+// ── 6. 统一 watcher 注册 ─────────────────────
+//     ★ 全项目的 watch 都在 watchControl/watchController.js 里注册，
+//       这里只写「值 → 地图动作」，不直接调 vue 的 watch()。
+//       好处：onBeforeUnmount 里 stopAll() 能一次清干净，
+//       要临时停某一个也用 stopById(标签)，不用满文件找。
+
+registerWatcher(
+  'base',
+  () => layerStore.baseMap,
+  (kind) => {
+    // ★ 必须成组换（vec 配 cva、img 配 cia），否则就是"影像图上叠矢量注记"
+    // ★ 用 setSource(新对象) 而不是 setUrl + refresh：
+    //   新 source 的瓦片缓存天然干净，不会残留旧底图的瓦片
+    baseLayer.setSource(createBaseSource(kind));
+    annoLayer.setSource(createAnnoSource(kind));
+  },
+);
+
 // 进入/退出分析模式、换工具、拖滑杆、卡片带中心进来 —— 都走这一条同步
-watch(
+registerWatcher(
+  'drawing',
   () => [analysis.active, analysis.tool, analysis.radius, analysis.center],
   syncDrawing,
   { deep: true, flush: 'post' },
 );
 
 // 换工具时把上一个工具的产物清掉（否则地图上会堆一堆图形）
-watch(
-  () => analysis.tool,
-  () => {
-    analysis.clearSketch();
-  },
-);
+registerWatcher('drawingTool', () => analysis.tool, () => {
+  analysis.clearSketch();
+});
 
 /**
  * 点选后把镜头拉到「缓冲圈看得见」的级别。
@@ -210,19 +219,16 @@ watch(
  */
 const BUFFER_ZOOM = 14;
 
-watch(
-  () => analysis.center,
-  (c) => {
-    if (!c || !map) return;
-    const view = map.getView();
-    if ((view.getZoom() ?? 0) >= BUFFER_ZOOM) return;
-    view.animate({
-      center: fromLonLat([c.lon, c.lat]),
-      zoom: BUFFER_ZOOM,
-      duration: 520,
-    });
-  },
-);
+registerWatcher('bufferZoom', () => analysis.center, (c) => {
+  if (!c || !map) return;
+  const current = map.getView();
+  if ((current.getZoom() ?? 0) >= BUFFER_ZOOM) return;
+  current.animate({
+    center: fromLonLat([c.lon, c.lat]),
+    zoom: BUFFER_ZOOM,
+    duration: 520,
+  });
+});
 
 /**
  * 热力图类别切换：只改 WMS 的 STYLES 参数，不重建图层。
@@ -231,11 +237,11 @@ watch(
  *   updateParams 只重发一次 GetMap 请求，且是「合并」——LAYERS / TRANSPARENT
  *   等其它参数原样保留；setSource 会重建整个 source，视觉上会闪一下白，
  *   瓦片缓存也全丢。
- * ★ 必须先判空：watcher 建立得比 onMounted 早，
- *   如果用户在图层建好前就切了类别（比如刷新时恢复了上次的选择），会报
- *   "Cannot read properties of null (reading 'getSource')"。
+ * ★ 必须先判空：registration 在 setup 阶段就执行，
+ *   而 heatLayer 在 onMounted 里才创建；这中间若状态变化会读到 null。
  */
-watch(
+registerWatcher(
+  'heat',
   () => layerStore.heatCategory,
   (key) => {
     if (!heatLayer) return;
