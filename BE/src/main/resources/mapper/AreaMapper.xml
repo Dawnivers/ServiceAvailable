@@ -1,0 +1,54 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE mapper PUBLIC "-//mybatis.org//DTD Mapper 3.0//EN"
+        "http://mybatis.org/dtd/mybatis-3-mapper.dtd">
+
+<!-- namespace 必须 = 接口的全限定名，否则绑定不上 -->
+<mapper namespace="com.dawnivers.be.mapper.AreaMapper">
+
+    <!-- id 必须 = 接口方法名 -->
+    <select id="countAreas" resultType="java.lang.Long">
+        select count(*) from admin_area
+    </select>
+
+    <!-- 你昨天那条 65 行 SQL，原样搬进来 -->
+  <select id="selectAreasGeoJson" resultType="java.lang.String">
+       SELECT json_build_object('type','FeatureCollection','features', json_agg(f))
+    FROM (
+  SELECT json_build_object(
+    'type','Feature',
+    'properties', json_build_object('adcode',adcode,'name',name,'level',level,'center',center),
+    'geometry', ST_AsGeoJSON(geom)::json
+  ) AS f
+  FROM admin_area
+      ) t
+  </select>
+
+  <resultMap id="DistrictStatMap" type="com.dawnivers.be.dto.DistrictStatDto">
+    <constructor>
+        <idArg column="adcode"     javaType="java.lang.Long"/>
+        <arg column="district"    javaType="java.lang.String"/>
+        <arg column="total"       javaType="java.lang.Long"/>
+        <arg column="areaKm2"     javaType="java.lang.Double"/>
+        <arg column="school"      javaType="java.lang.Long"/>
+        <arg column="hospital"    javaType="java.lang.Long"/>
+        <arg column="mall"        javaType="java.lang.Long"/>
+        <arg column="park"        javaType="java.lang.Long"/>
+    </constructor>
+</resultMap>
+
+<select id="statByAdcode" resultMap="DistrictStatMap">
+    select a.adcode as adcode,          <!-- ★ integer → MyBatis 转 Long -->
+           a.name as district,
+           count(p.gid) as total,
+           round((ST_Area(a.geom::geography)/1e6)::numeric, 2) as "areaKm2",
+           count(*) filter (where p.category = 'school')   as school,
+           count(*) filter (where p.category = 'hospital') as hospital,
+           count(*) filter (where p.category = 'mall')     as mall,
+           count(*) filter (where p.category = 'park')     as park
+    from admin_area a
+    left join poi p on p.adcode = a.adcode::text     <!-- ★ integer = text 必须转 -->
+    where a.adcode = #{adcode}
+    group by a.adcode, a.name, a.geom
+</select>
+
+</mapper>
