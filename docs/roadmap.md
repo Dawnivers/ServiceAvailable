@@ -670,6 +670,330 @@ percentile_cont(0.2/0.4/0.6/0.8) WITHIN GROUP (ORDER BY cnt)
 **★ 分母必须动态算，不能写死**：`03` 每次刷新都用 `(该类总数 / 全市面积) × π·0.8²` 重算。
 若把当前值 3.7555 硬编码，将来补采 30% 数据后 `avg(r)` 会漂到 1.30，图例含义就崩了。
 
+#### ⑨ 增量刷新：新增 POI 后不用跑全量（2026-11-01）
+
+| 场景 | 脚本 | 耗时 |
+|---|---|---|
+| 只新增 POI | `03b_refresh_incremental.sql` | **788 ms**（实测 2 条 POI → 21 格） |
+| 删除 / 改坐标 / 整表重灌 | `03_refresh_grid_500m.sql` | 5–15 min |
+
+**检测原理用 `gid` 不用 `fetched_at`**：`grid_500m_refresh_state` 记 `last_max_gid`，`gid` 是 serial 序列单调递增，
+所以 `gid > last_max_gid` 精确等于「本次新增」。
+
+> **第一版用 `fetched_at > 上次刷新时刻`，测试时发现真 bug**：首次初始化把标记设为「当前时刻」，
+> 刚插入的 POI 的 `fetched_at` 也等于当前时刻 → 比较恒为 false → **新增数据被静默漏掉**。
+> 换成 gid 后不依赖时钟、不受时区影响。
+
+**行数双保险**：当前行数 < 上次记录行数 → `RAISE EXCEPTION` 要求跑全量，避免删除被静默漏算。
+
+**⚠️ 增量唯一的盲区**：`UPDATE poi SET geom=...` 改坐标时 gid 不变 → 检测不到 → **静默算错**。
+所以 README 必须写死一条：**改坐标一定跑 `03` 全量**。
+
+`03`（全量）跑完会用 `ON CONFLICT DO UPDATE` 同步标记表，两个脚本可随意交替。
+
+### 2.4.10 G1：发布 `wuhan:grid_500m`（2026-11-01 完成）
+
+**走 REST 而不是点界面**（可复现、可写进文档）：
+
+```powershell
+$b = [Convert]::ToBase64String([Text.Encoding]::ASCII.GetBytes("admin:geoserver"))
+POST http://localhost:8080/geoserver/rest/workspaces/wuhan/datastores/spatial_db/featuretypes
+Content-Type: application/json
+{"featureType":{"name":"grid_500m","nativeName":"grid_500m","srs":"EPSG:4326",
+                "projectionPolicy":"FORCE_DECLARED","enabled":true}}
+→ HTTP 201
+```
+
+**★ 这张表有两个几何列，发布时必须验证默认几何是 `geom` 不是 `centroid`**
+
+`grid_500m` 同时有 `geom`(Polygon) 和 `centroid`(Point)。GeoServer 把两个都收成了几何属性，
+若默认选到 `centroid`，图层会画成**点**而不是面。
+
+实测确认（两条都要看）：
+
+| 验证 | 结果 |
+|---|---|
+| WMS GetMap 出图 | 600×600 灰色**方格** + 黑边 → 是面 ✅ |
+| GetFeatureInfo 的 `geometry_name` | `"geom"`，`geometry.type` = `Polygon` ✅ |
+
+**GetFeatureInfo 直接就是弹窗数据源**，无需新接口：
+
+```jsonc
+// GET .../wms?...&INFO_FORMAT=application/json  点江汉路
+{"geometry_name":"geom",
+ "properties":{"total":176,"school":19,"hospital":53,"mall":96,"park":8,
+               "r_total":46.86,"r_school":17.43,"r_hospital":42.27,
+               "r_mall":84.27,"r_park":29.35,
+               "centroid":{"type":"Point","coordinates":[114.28425,30.58425]}}}
+```
+
+→ 正好满足「颜色用倍数、数量放弹窗」的设计（§2.4.9 ⑥）。
+
+**当前状态**：图层已发布，用的是 GeoServer 默认多边形样式（灰色）。
+**G2 要做**：上传 `grid_total` SLD，阈值 `[0.2, 1, 3, 10]`，第 1 档透明。
+
+---
+
+### 2.4.11 G2：`grid_total` SLD 与两个渲染坑（2026-11-01 完成）
+
+样式源文件：[`styles/grid_total.sld`](../../../styles/grid_total.sld)，工作区样式名 `wuhan:grid_total`。
+
+![格网热力图（全市）](./img/grid-heatmap-city.png)
+
+#### 分档（最终 6 档 + 1 个空值保护）
+
+| 规则 | 范围 | 颜色 | 实测格子数 |
+|---|---|---|---|
+| `no_data` | `r_total IS NULL` | **不画** | 0（防御用） |
+| `band1_none` | `< 0.2` | **不画** | 26,786（67.3%） |
+| `band2_low` | `0.2 – 1` | `#fecc5c` 浅黄 | 6,848 |
+| `band3_mid` | `1 – 3` | `#fd8d3c` 橙黄 | 2,867 |
+| `band4_high` | `3 – 10` | `#f03b20` 橙红 | 2,145 |
+| `band5_extreme` | `10 – 25` | `#bd0026` 深红 | 1,056 |
+| `band6_core` | `≥ 25` | `#67000d` 暗酒红 | 118 |
+
+配色来自 ColorBrewer **YlOrRd**。
+
+#### ★ 坑 1：透明档有两种写法，只有一种能存进 GeoServer
+
+这一档要「什么都不画」（26,786 个零值格，占 67.3%）。试过两条路：
+
+**写法 A：Rule 里不放任何 Symbolizer**
+
+```xml
+<Rule><Name>band1_none</Name><ogc:Filter>...</ogc:Filter></Rule>
+```
+
+| | 结果 |
+|---|---|
+| WMS 渲染 | ✅ 真的什么都不画（REST 上传也能存） |
+| GeoServer 界面「验证」 | ❌ **报错**：<br>`line 55: cvc-complex-type.2.4.b: 元素 'Rule' 的内容不完整。应为 '{"...MinScaleDenominator", "...MaxScaleDenominator", "...Symbolizer"}' 之一。` |
+
+**原因**：SLD 1.0.0 的 XSD **要求 `Rule` 至少含一个 `MinScaleDenominator` / `MaxScaleDenominator` / `Symbolizer`**。
+渲染器不校验 XSD，所以能出图；但界面保存/验证会拦下来。
+
+> 换句话说：**REST 的 `PUT` 不做 XSD 校验，界面「验证」按钮做。**
+> 这就是"能渲染"和"能保存"不是一回事的原因。
+
+**写法 B（正解）：给一个透明的 PolygonSymbolizer**
+
+```xml
+<Rule>
+  <Name>band1_none</Name>
+  <ogc:Filter>...</ogc:Filter>
+  <PolygonSymbolizer>
+    <Fill>
+      <CssParameter name="fill">#ffffff</CssParameter>
+      <CssParameter name="fill-opacity">0</CssParameter>
+    </Fill>
+  </PolygonSymbolizer>
+</Rule>
+```
+
+✅ 通过 XSD 校验　✅ 渲染透明（实测格子中心像素 `alpha = 0`）
+
+![格网热力图（街区级）](./img/grid-heatmap-zoom.png)
+
+#### ★ 坑 2：`stroke-width=0` 会被当成"发丝线"，不是"不描边"
+
+第一版每条规则都写了：
+
+```xml
+<Stroke><CssParameter name="stroke-width">0</CssParameter></Stroke>
+```
+
+**结果：整片零值格渲染成灰色网格**，2/3 的地图被糊住。
+
+**归因过程（一开始我判断错了）**：先怀疑是 `<Fill>` 只给 `fill-opacity` 不给 `fill` 色导致回退默认灰。
+于是用 WMS 的 `SLD_BODY` 参数做了三组对照实验，抽格子中心像素的 alpha：
+
+| 变体 | 符号化 | 中心像素 |
+|---|---|---|
+| A 空 Rule | 无 symbolizer | `(255,255,255,0)` 透明 |
+| B Fill 有色 + opacity 0，无 Stroke | 有 | `(255,255,255,0)` 透明 |
+| C Fill 只有 opacity 0 + Stroke width 0 | 有 | `(255,255,255,0)` 透明 |
+
+**三组中心像素全透明** → 说明填充从来就不是问题，**灰网格是那个 0 宽描边画出来的**：
+宽度 0 被渲染器解释为发丝线，39,820 个格子各描一圈，格子的 3 个像素里 2 个被线占掉，视觉上就是一层灰网。
+
+**修法：整个 `<Stroke>` 元素不要写**，而不是把 width 设 0。
+
+去掉描边后，相邻同色格**连成一片**——这才是热力图想要的效果。
+
+> **教训**：一次改两个变量（fill 色 + stroke 宽度）导致归因错误，白改了一轮。
+> 定位渲染问题应该用 `SLD_BODY` 做单变量对照，抽像素验 alpha，而不是靠"看图猜哪不对"。
+
+#### ★ 为什么最高档要从 10 拆到 25
+
+只用 `≥10` 一个深红档时，市中心（江汉路一带）**69% 的格子都落在这一档**（实测该范围 437 格中 301 格），
+渲染出来是一整片没有层次的深红。
+
+查该范围 `≥10` 那些格子的分布：**min 10.1 / p25 15.2 / p50 19.7 / p75 28.0 / max 57.0**
+→ 内部确有梯度，在 **25** 处拆一刀后「最核心」能浮出来（全市仅 118 格 ≥25）。
+
+#### 关键参数
+
+| 参数 | 值 | 说明 |
+|---|---|---|
+| `fill-opacity` | `0.78` | 让天地图底图透出来；调小更透、调大更实 |
+| `stroke` | **不写** | 写了就是黑网 |
+| 判定字段 | `r_total` | 不是 `total`——颜色表达「相对全市平均的倍数」 |
+
+四张分类图只需把 `r_total` 换成 `r_school` / `r_hospital` / `r_mall` / `r_park`，
+但**公园要单独调阈值**（`park` 的 max 只有 13，全市仅 1,163 条，见 §2.4.9 ⑤）。
+
+#### ★ 坑 3：SLD 里存了中文，可能被写成 GBK 导致预览直接 500
+
+**症状**：图层预览打不开，返回 WMS 异常：
+
+```xml
+<ServiceException>
+java.lang.reflect.UndeclaredThrowableExceptionorg.xml.sax.SAXParseException;
+lineNumber: 3; columnNumber: 18; 1 字节的 UTF-8 序列的字节 1 无效。
+</ServiceException>
+```
+
+**诊断（一条命令定性）**：把 GeoServer 里存的 SLD 取下来，看它到底是什么编码。
+
+```powershell
+# 取存储版本
+Invoke-WebRequest "http://localhost:8080/geoserver/rest/workspaces/wuhan/styles/grid_total.sld" `
+  -Headers $h -OutFile stored.sld
+
+# 分别按 UTF-8 / GBK 解码，哪个能读通就是哪个
+$bytes = [IO.File]::ReadAllBytes("stored.sld")
+[Text.Encoding]::GetEncoding(936).GetString($bytes)     # GBK
+(New-Object Text.UTF8Encoding($false,$true)).GetString($bytes)  # 严格 UTF-8，会抛异常
+```
+
+实测结果（2026-11-01）：**盘上文件 9,207 字节合法 UTF-8；GeoServer 里存的 8,639 字节，
+按 GBK 一解中文全对** → 内容没错，是**编码被存成了 GBK**，而 XML 头声明的是 `encoding="UTF-8"`
+→ 解析器在第 3 行（第一条中文注释）就崩。
+
+**根因**：REST `PUT` 的 `Content-Type` 没带 `charset` 时，GeoServer 用**平台默认编码**解码请求体。
+这台机器是中文 Windows，默认 = **GBK** → UTF-8 字节被当成 GBK 读 → 落盘就是乱码编码。
+
+**修复：上传/覆盖时显式声明 charset**
+
+```powershell
+Invoke-WebRequest "http://localhost:8080/geoserver/rest/workspaces/wuhan/styles/grid_total" `
+  -Method PUT -Headers $h `
+  -ContentType "application/vnd.ogc.sld+xml; charset=UTF-8" `
+  -Body ([IO.File]::ReadAllBytes("styles/grid_total.sld"))
+```
+
+修完复查：存储版本变成**合法 UTF-8**（6,255 字节，GeoServer 会重新序列化并丢掉注释，
+所以**仓库里的 `.sld` 才是可读的唯一真源**，GeoServer 里那份只是编译产物）。
+
+**两个附带结论**：
+
+1. **别再怀疑 GeoServer 不支持 UTF-8** —— 对照实验：`poi_icons` 存在 GeoServer 里就是合法 UTF-8。
+   问题只出在「上传时没声明 charset」这一条链路上。
+2. **注释会被 GeoServer 丢掉**。所以 SLD 里写得再详尽的说明，在服务器上是看不到的 ——
+   想看设计意图必须回到仓库文件或本文档。
+
+> **通用教训**：凡是「Windows + 中文 + XML/JSON 上传」，`Content-Type` 一定要带 `charset=UTF-8`，
+> 否则默认编码取决于运行环境，本地测好了换个环境就炸。
+
+---
+
+### 2.4.12 G3：四张分类热力图（2026-11-01 完成）
+
+五个样式全部就位（`styles/*.sld` → 工作区样式 `wuhan:grid_*`）：
+
+| 样式名 | 判定字段 | 配色 | 阈值 | 可见档 |
+|---|---|---|---|---|
+| `grid_total` | `r_total` | YlOrRd | `.2 / 1 / 3 / 10 / 25` | 5 |
+| `grid_school` | `r_school` | Blues | `.2 / 1 / 3 / 10 / 25` | 5 |
+| `grid_hospital` | `r_hospital` | Reds | `.2 / 1 / 3 / 10 / 25` | 5 |
+| `grid_mall` | `r_mall` | YlOrBr | `.2 / 1 / 3 / 10 / 25` | 5 |
+| `grid_park` | **`park`（个数，不是倍数）** | Greens | `1 / 2 / 3 / 4` | 4 |
+
+![四类分类热力图](./img/grid-heatmap-categories.png)
+
+#### ★ 为什么公园必须改成按「个数」分档
+
+先说结论：**公园的倍数分布是量子化的，套小数阈值会出现空档。**
+
+公园全市只有 1,163 条，基准密度 0.1356 /km² → 分母 `0.2727`。
+于是「1 个公园」就等于 **3.67 倍**，「2 个」= 7.33 倍……**从 0 直接跳到 3.67，中间没有任何格子。**
+
+实测四类在统一阈值 `[0.2, 1, 3, 10, 25]` 下的分布，一眼就能看出问题：
+
+| 类别 | 无覆盖 | 0.2–1 | 1–3 | 3–10 | 10–25 | ≥25 |
+|---|---|---|---|---|---|---|
+| school | 30,611 | 3,414 | 2,357 | 2,323 | 1,018 | 97 |
+| hospital | 32,501 | 2,757 | 1,500 | 1,851 | 969 | 242 |
+| mall | 32,396 | 2,292 | 1,796 | 2,152 | 1,013 | 171 |
+| **park** | 34,598 | **0** | **0** | 3,892 | 1,157 | 173 |
+
+**park 的 0.2–1 和 1–3 两档是空的**（各 0 个格子）。图上只会剩 3 种绿，
+而且图例写「0.2–1 倍平均」却一个格子都没有 —— 读者会以为坏了。
+
+**改成按原始个数分档**（`park` 是 integer 列，GeoServer 已发布该属性）：
+
+| 档 | 条件 | 格子数 | 占比 |
+|---|---|---|---|
+| 透明 | 0 个 | 34,598 | 86.89% |
+| 浅绿 | 1 个 | 2,849 | 7.15% |
+| 中绿 | 2 个 | 1,043 | 2.62% |
+| 深绿 | 3 个 | 538 | 1.35% |
+| 墨绿 | ≥4 个 | 792 | 1.99% |
+
+→ 图例写「1 个 / 2 个 / 3 个 / ≥4 个」，任何人都能对上，**这才是这个类别该有的表达**。
+
+> **可推广的判断规则**：当某一类的「1 个」就已经远超 1 倍平均时，相对倍数失去区分度，
+> 应该退回绝对数量。
+
+#### ★ 坑（复用 §2.4.11 坑 3）：批量上传同样会丢 charset
+
+第一批 4 个样式是用 `-ContentType "application/vnd.ogc.sld+xml"`（**没带 `charset`**）传的。
+
+**症状很隐蔽**：渲染完全正常，看不出问题。但把服务器上存的 SLD 取回来检查会发现：
+
+| 检查 | 结果 |
+|---|---|
+| 严格 UTF-8 解码 | **通过**（字节确实合法） |
+| 内容里 U+FFFD 替换字符 | **有**（中文全变成 `�`） |
+
+**原因**：UTF-8 字节被当 GBK 解 → 解不出的字节变成 `�` → 再按 UTF-8 存盘。
+所以「合法 UTF-8」不代表「内容正确」，**必须查 U+FFFD**。
+
+诊断一行：
+
+```powershell
+$s = [Text.Encoding]::UTF8.GetString([IO.File]::ReadAllBytes("stored.sld"))
+([regex]::Matches($s, [char]0xFFFD)).Count    # 必须为 0
+```
+
+修复后复查：五个样式的 FFFD 全部为 0，`<sld:Title>` 里中文正常
+（`500m 格网公园可达性热力图`）。
+
+#### 前端怎么用
+
+**不需要发布 5 个图层**，同一图层换 `STYLES` 参数即可：
+
+```
+.../wms?layers=wuhan:grid_500m&styles=wuhan:grid_park&...
+```
+
+OpenLayers 里不用重建图层：
+
+```js
+layer.getSource().updateParams({ STYLES: 'wuhan:grid_school' })
+```
+
+`updateParams` 只重发请求，**比换图层快得多**。
+
+#### 图例建议
+
+| 图层 | 图例写法 |
+|---|---|
+| total / school / hospital / mall | 「相对于全市平均的倍数」+ 5 个色块 |
+| **park** | 「800 m 步行圈内公园个数」+ 4 个色块 |
+
+两种图例不能混用 —— 一个是相对值一个是绝对值，混了会误导。
+
 ---
 
 ### 2.5 可以一直不做的（先不做）
