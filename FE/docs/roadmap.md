@@ -27,14 +27,16 @@
 | **D10–D11** ✅ | 测试 | `mvn test` 绿（规格 3 用例，**实际 6 用例**） | D9 |
 | **D12** ✅ | 地图交互 | 图层开关 + 透明度 + 点击弹详情 + 天地图底图成组切换 | GeoServer `wuhan:poi` ✅ |
 | **D13** ✅ | 缓冲区分析（**2026-10-31 已完成**） | 点选 → 800 m 圆 → 统计卡片；外加任意多边形 `within` | D9 的 `nearby` 接口 |
-| **D14–D15** | 缓冲区收口 / 抢进 D16（**空白格，细项见 §2.4.8**） | 多点对比、分类高亮专题图，或直接做格网 | D13 |
-| **D16–D18** | 格网 + 热力图 | `grid_500m` 表 + GeoServer 新图层 + 前端分级 | PostGIS 空间函数 |
-| **D19–D20** | 打磨 + 录屏 + README | 30 秒演示视频、五张截图 | 以上全部 |
+| **D14–D15** | 缓冲区收口 / 抢进 D16（**跳过**，见 §2.4.8「建议选 B」） | 多点对比、分类高亮专题图 | D13 |
+| **D16–D18** ✅ | 格网 + 热力图（**2026-11-01 完成**） | `grid_500m` 表 + `wuhan:grid_500m` 图层 + 5 个 SLD + 前端可切换/可点选 | PostGIS 空间函数 |
+| **D19–D20** | 打磨 + 录屏 + README | 30 秒演示视频、截图、录屏 | 以上全部 |
 | **D21** | 复盘 + 投递 | 简历 + 项目自述 | — |
 
-> **当前站位（2026-10-31 19:30）**：**D13 完成 → D14 起点**。
-> 计划 D5→D13 是 8 个工作日，实际 2026-10-27 → 10-31 用 5 个自然日走完（约 1.6×）。
-> 下一步待定：D14/D15 原文是空白格，候选细项见 §2.4.8。
+> **当前站位（2026-11-01 20:30）**：**D18 完成 → D19 起点**。
+> 后端 7 接口 / 格网表 / GeoServer 5 个样式 / 前端热力图（含点格弹窗）全部就绪，
+> 详见 §2.4.9–§2.4.13。剩下的只有 D19–D21 的「**展示与投递**」：录屏、README、简历。
+>
+> 进度账：计划 D5→D18 是 14 个工作日；实际 2026-10-27 → 11-01 用 **6 个自然日**走完（约 2.3×）。
 
 ---
 
@@ -996,6 +998,212 @@ layer.getSource().updateParams({ STYLES: 'wuhan:grid_school' })
 
 ---
 
+### 2.4.13 F1 + F4：前端热力图与点格弹窗（2026-11-01 完成）
+
+后端出数（B1–B5）→ GeoServer 出图（G1–G3）→ 前端接进来（F1–F4）。
+本节记**前端这一层**：入口放哪、类别怎么切、点格子怎么取数，以及期间修的三个真 bug。
+
+#### ① 文件清单
+
+| 文件 | 职责 | 新增/改 |
+|---|---|---|
+| `map/heatmap.js` | **前端唯一真源**：5 个类别的 label / STYLES 名 / 阈值 / 色带；`heatLegend()` 推导图例文字 | 新 |
+| `map/gridInfo.js` | `pickGrid()` 点格取数（GetFeatureInfo）、`GRID_CATEGORIES`、`MIN_GRID_ZOOM` | 新 |
+| `stores/grid.js` | 当前选中格子的属性 + `loading/error/hint` | 新 |
+| `components/GridPopup.vue` | 点格统计卡（大数字 + 四类条形 + 倍数） | 新 |
+| `map/wms.js` | 加 `createHeatLayer()`（`STYLES` 参数化，`className` 挂在 **Layer** 上） | 改 |
+| `map/layers.js` | 注册表加 `heat` 行，带 `options`（可点类别） | 改 |
+| `stores/layers.js` | 加 `heat` 显隐/透明度、`heatCategory`；**heat ↔ poi 互斥** | 改 |
+| `view/mapView.vue` | 建热力层（**在 POI 之前**）+ 4 个 `registerWatcher` | 改 |
+| `components/LayerPanel.vue` | 新增「可点类别单选」行（`option-pick` 事件） | 改 |
+| `components/MapLegend.vue` | `mode='poi'|'heat'` 双模式 + 虚线「无覆盖」色块 | 改 |
+| `App.vue` | 装配类别切换、图例模式、点格卡；分析模式进出时切图层 | 改 |
+
+#### ② 入口为什么放图层控制面板里
+
+屏幕上已有 6 块浮动区域（顶栏 / 图层控制 / 详情卡 / 图例 / 统计条 / 比例尺），
+再加一个独立「热力图面板」会互相压。而且**热力图本质是一张可开关的图层**，不是一种工作模式 ——
+放进 `LayerPanel` 用户不用学新概念。
+
+```
+┌─ 图层控制 ───────────── 5 个图层 ─┐
+│ ☑ POI 设施             16,016    │
+│ ☑ 可达性热力图         500m 格网  │
+│    [全部][学校][医院][商场][公园]  │ ← 可点单选（与上面的 chips 不同，chips 只展示）
+│    ─────●─────  0.8              │
+└───────────────────────────────────┘
+```
+
+**三个交互决策**：
+
+| 决策 | 取值 | 理由 |
+|---|---|---|
+| 类别 | **单选**（「全部」是一个选项） | 一张图的颜色只能有一种含义，多选等于混色 |
+| 与 POI 层 | **互斥**，开一个关另一个 | 同一个数据的「面」与「点」，同时开面会压暗点 |
+| 图例 | **切换**而非并排 | POI 图例是「类别→颜色」，热力图是「数值→颜色」，并排会读混 |
+
+#### ③ 类别切换怎么落到 GeoServer（一句话：只换 `STYLES`，不换图层）
+
+```
+点「公园」
+  → LayerPanel.onOption → emit('option-pick','heat','park')
+  → App.onOptionPick → store.setHeatCategory('park')     [白名单校验]
+  → registerWatcher('heat') 回调
+  → heatStyleName('park') = 'wuhan:grid_park'
+  → heatLayer.getSource().updateParams({ STYLES: 'wuhan:grid_park' })
+  → OL: Object.assign(params_) + image=null + changed()
+  → 画布重绘 → 新的 GetMap 请求
+  → GeoServer 换一份 SLD 渲整屏 PNG
+```
+
+**`updateParams` 优于 `setSource`**：它是**合并**语义（`LAYERS`/`TRANSPARENT` 原样保留），
+只重发一次请求；`setSource` 会重建 source、闪白、丢缓存。
+
+**`wuhan:` 前缀不能省** —— 样式是工作区级的，不带前缀会**静默回落到默认灰**，不报错。
+
+#### ④ 点格弹窗：走 WMS 的 `GetFeatureInfo`，不是 WFS
+
+`ImageLayer + ImageWMS` 是服务器渲好的 PNG，**浏览器侧没有任何 Feature**，
+`forEachFeatureAtPixel` 拿不到东西，只能回头问服务器「这个像素是哪个格子」。
+
+| | **GetFeatureInfo**（本项目用） | WFS `GetFeature` |
+|---|---|---|
+| 给什么 | 像素坐标 + bbox | 查询条件（空间/属性过滤） |
+| 回什么 | 该像素上的要素**属性** | **完整要素集**（几何+属性） |
+| 体积 | 1 个要素 ≈ 700 B | 视窗内上千个 500m 方格 → 几百 KB |
+
+**URL 结构**（OL 的 `getFeatureInfoUrl` 现造，与出图无关）：
+
+```
+/geoserver/wuhan/wms?REQUEST=GetFeatureInfo
+  &LAYERS=wuhan:grid_500m&QUERY_LAYERS=wuhan:grid_500m
+  &STYLES=wuhan:grid_total&INFO_FORMAT=application/json
+  &WIDTH=101&HEIGHT=101&X=50&Y=50          ← 窗口固定 101×101，点击点恒在中心
+  &SRS=EPSG:3857                            ← 跟着 view 投影，GeoServer 负责重投影
+  &BBOX=<点击点 ± 50.5×resolution>
+```
+
+**`resolution` 在这里的唯一作用**：把「地图单位」换成「像素」——
+`x = (coordX − bboxLeft) / resolution`。所以 `BBOX` 宽度 = `101 × resolution`：
+z9 是 30,881 m，z14 是 965 m。
+
+> 两处曾写错、已更正：`getFeatureInfoUrl` **不读**图层上次出图的 bbox（自建窗口），
+> 也与 source 的 `ratio(1.5)` **无关**（width/height 恒 101）。
+
+#### ⑤ F4 期间修的三个真 bug（都有实测证据）
+
+**坑 1：`features[0]` 会取到邻居格子**
+
+同一坐标（江汉路格心，正确值 **176**）：
+
+| zoom | 1px 对应 | 候选数 | `features[0]` |
+|---|---|---|---|
+| 9 | 305.7 m | 8 个 | **146** ❌ |
+| 10 | 152.9 m | 6–8 个 | 176 ✅ |
+| 11–14 | 76–9.6 m | 1–2 个 | 176 ✅ |
+
+z9 返回的 8 个格子格心都在 114.2750/114.2795，点击点在 114.2843 —— **全在西侧两格**。
+原因：101×101 窗口在 z9 有 30 km 宽，盖住几千个格子，服务端按 `FEATURE_COUNT` 截断。
+
+**修法**：逐个做几何包含判断，只认真正盖住点击点的。
+
+```js
+for (const f of data.features) {
+  const geom = geoJson.readGeometry(f.geometry);
+  if (geom.intersectsCoordinate(evt.coordinate)) return f.properties;
+}
+```
+
+> 同一个坑还牵出第二个：**响应几何已经是 3857**（跟着请求的 `SRS` 回来）。
+> 若写成 `readGeometry(f.geometry, { dataProjection: 'EPSG:4326', ... })`，
+> 等于把 3857 的数值当度数去变换 → 范围变 `Infinity` → **永远判不中**。
+
+**坑 2：低缩放根本不值得点 → 加门槛**
+
+```js
+export const MIN_GRID_ZOOM = 11;
+```
+
+`zoom < 11` 不发请求，卡片显示中性提示「请放大到街区级再点格子（当前 z9.0，需 ≥ z11）」。
+z10 实测也能 3/3 命中，但候选已 6–8 个、贴着截断上限，换个位置可能就漏；z11 只 1–2 个，稳。
+
+> 提示走 `stores/grid.js` 的 `hint` 而不是 `error` —— 这不是出错，不该用红色警告。
+
+**坑 3：GeoServer 报错返回的是 `HTTP 200 + XML`**
+
+```
+<ServiceException>QUERY_LAYERS contains layers not cited in LAYERS...</ServiceException>
+```
+
+直接 `res.json()` 会抛 `Unexpected token '<'`，把真实原因埋掉。改成：
+
+```js
+const text = await res.text();
+try { data = JSON.parse(text) }
+catch {
+  const m = text.match(/<ServiceException[^>]*>([\s\S]*?)<\/ServiceException>/);
+  throw new Error(m ? m[1].trim() : 'WMS 返回了非 JSON 响应');
+}
+```
+
+界面只显示「格子查询失败（详情见控制台）」，真报错 `console.warn` 留下。
+
+#### ⑥ 另外修的两个 Bug（与热力图相关但不是新功能）
+
+| Bug | 现象 | 根因 |
+|---|---|---|
+| **POI 图钉在分析模式下变灰** | 灰底 + 灰点，看不出设施分布 | `createPOILayer` 多挂了 `className: 'ol-layer-base'`。**而 `mapView` 的注释和 §2.4.1 的设计都写着「POI 不挂」—— 文档与代码不一致** |
+| 5 个 SLD 里 8 条空 Rule | GeoServer「验证」报 `cvc-complex-type.2.4.b` | SLD 1.0.0 要求 Rule 至少一个 Symbolizer；渲染不受影响但规范不过。已统一改成「透明 Fill + 不写 Stroke」 |
+
+**教训**：验收清单要同时覆盖「**变灰的**」和「**保持不变色的**」，只写前者就会漏。
+
+#### ⑦ watch 规范落地（2026-11-01 用户纠正后重构）
+
+`mapView.vue` 里原有 **5 个裸 `watch()`**（底图换源、分析同步、工具清空、缓冲圈缩放、
+热力图类别）。全部改为在 `watchControl/watchController.js` 注册：
+
+```js
+registerWatcher('base',       () => layerStore.baseMap,     /* 换瓦片源 */);
+registerWatcher('drawing',    () => [active, tool, radius, center], syncDrawing, { deep: true, flush: 'post' });
+registerWatcher('drawingTool',() => analysis.tool,          /* clearSketch */);
+registerWatcher('bufferZoom', () => analysis.center,        /* 拉镜头到 z14 */);
+registerWatcher('heat',       () => layerStore.heatCategory,/* updateParams */);
+registerWatcher('gridClear',  () => [visible.heat, active], /* 收起点格卡 */);
+```
+
+**关键：与图层显隐/透明度的 watcher 共用同一个 `stops` 栈**，
+所以 `stopAll()`（组件卸载）和 `stopById(id)`（单独停）能一视同仁地清理。
+
+**分界线**：`store 值 → OL 对象动作` 走 `watchController`；
+`组件自己的 prop / 本地输入`（`MapScaleReadout` 的 `props.map`、`SearchBox` 的输入防抖）留在组件内。
+
+#### ⑧ 分析模式与热力图的联动
+
+进入分析模式时热力图**让位**（关掉、亮起 POI），退出时**按进入前的状态恢复**：
+
+```js
+let heatBeforeAnalysis = false
+
+function enterAnalysis(opts) {
+  heatBeforeAnalysis = store.visible.heat
+  analysis.enter(opts)
+  store.toggle('heat', false)
+  store.toggle('poi', true)
+}
+function exitAnalysis() {
+  analysis.exit()
+  if (heatBeforeAnalysis) store.toggle('heat', true)   // 互斥会自动关掉 poi
+  heatBeforeAnalysis = false
+}
+```
+
+**三个入口（顶栏 / 卡片「附近分析」/ 工具栏退出）统一走这两个函数**，
+避免"从不同入口进来行为不一致"。
+
+> 记在模块作用域而不是 store：它只在一次进出之间有效，放进 store 会变成"持久化偏好"的假象。
+
+---
+
 ### 2.5 可以一直不做的（先不做）
 
 | 组件 | 替代方案 |
@@ -1460,7 +1668,7 @@ HTTP 错误统一 `{timestamp,status,error,message,path}` —— `message` 里�
 | **D10–D11 完成** ✅ | `mvn test` 3 用例绿（覆盖三个业务接口的主路径）—— 2026-10-29 实测 `Tests run: 3, Failures: 0, Errors: 0`；`lon/lat` 范围校验同步补齐（技术债清零）。**2026-10-31 扩到 6 用例**（新增 3 条 inside-polygon） |
 | **D12 完成** ✅ | ① 页面上能看到 POI（放大出图钉）② 关闭勾选立即消失 ③ 透明度滑杆生效 ④ Network 里 `STYLES=wuhan:poi_icons` 且 200 ⑤ 拖动不卡成幻灯片 —— **2026-10-30 五条全过** |
 | **D13 完成** ✅ | 点地图 → 画出 800 m 圆 → 右侧数字与 `ST_DWithin` 查询结果一致 —— **2026-10-31 实测**：`114.3687,30.6316` r=800 → count **83**、最近 82 m；多边形 `within` 额外交付（三角形 → 125 条 / 5.85 km²） |
-| **D18 完成** | 500 m 格网分级渲染（覆盖率热力）+ 图例可读 |
+| **D18 完成** ✅ | 500 m 格网分级渲染（覆盖率热力）+ 图例可读 —— **2026-11-01 实测**：① 39,820 格 / 5 个 SLD 均可渲染 ② 点类别 1 次 GetMap 即换色（`updateParams`）③ 图例随类别在「倍数 / 个数」两套文案间切换 ④ 点格取数正确（z≥11 时江汉路格 total=176，与库内一致）⑤ 进分析模式自动让位并恢复 |
 | **D20 完成** | 30 秒录屏；README 含架构图、启动步骤、5 张截图、踩坑记录 |
 
 ---
