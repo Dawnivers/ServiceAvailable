@@ -7,10 +7,12 @@
   医院是四类里最多的（5,347 条），零值率 81.6%。
 
   ★ 两个渲染上必须避开的坑（都是实测踩出来的）：
-    ① 想"不画"某档时，<Rule> 里**一个 symbolizer 都不要给**。
-       只写 <Fill><CssParameter name="fill-opacity">0</...> 会回退成默认灰填充，
-       整片格子变成灰块，底图全被糊住。
-    ② 不要描边。写 <Stroke> 哪怕 stroke-width=0，仍会画出细线；
+    ① 想"不画"某档时：给一个 <PolygonSymbolizer>，Fill 里写 fill 色 +
+       fill-opacity=0，并且**绝对不要写 <Stroke>**。
+       不能干脆省略 symbolizer —— SLD 1.0.0 的 XSD 要求 Rule 至少含一个
+       Symbolizer，空 Rule 虽然能渲染，但 GeoServer 的「验证」会报
+       cvc-complex-type.2.4.b：Rule 内容不完整。
+    ② 不要描边。写 <Stroke> 哪怕 stroke-width=0，渲染器仍按发丝线画；
        39,820 个格子一起描边就是一张黑网。**整个 <Stroke> 元素都不要写**。
 
   配色来源：ColorBrewer「Reds」
@@ -38,6 +40,12 @@
               <ogc:PropertyName>r_hospital</ogc:PropertyName>
             </ogc:PropertyIsNull>
           </ogc:Filter>
+          <PolygonSymbolizer>
+            <Fill>
+              <CssParameter name="fill">#ffffff</CssParameter>
+              <CssParameter name="fill-opacity">0</CssParameter>
+            </Fill>
+          </PolygonSymbolizer>
         </Rule>
 
         <!-- 第 1 档：< 0.2 → 透明（800m 内一个都没有） -->
@@ -50,6 +58,12 @@
               <ogc:Literal>0.2</ogc:Literal>
             </ogc:PropertyIsLessThan>
           </ogc:Filter>
+          <PolygonSymbolizer>
+            <Fill>
+              <CssParameter name="fill">#ffffff</CssParameter>
+              <CssParameter name="fill-opacity">0</CssParameter>
+            </Fill>
+          </PolygonSymbolizer>
         </Rule>
 
         <!-- 第 2 档：[0.2, 1) → #fcbba1 -->

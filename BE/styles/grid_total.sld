@@ -67,6 +67,7 @@
               <ogc:PropertyName>r_total</ogc:PropertyName>
             </ogc:PropertyIsNull>
           </ogc:Filter>
+
           <PolygonSymbolizer>
             <Fill>
               <CssParameter name="fill">#ffffff</CssParameter>
@@ -85,6 +86,7 @@
               <ogc:Literal>0.2</ogc:Literal>
             </ogc:PropertyIsLessThan>
           </ogc:Filter>
+
           <PolygonSymbolizer>
             <Fill>
               <CssParameter name="fill">#ffffff</CssParameter>
