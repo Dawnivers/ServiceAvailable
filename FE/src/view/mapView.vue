@@ -29,6 +29,7 @@ import { useAnalysisStore } from '@/stores/analysis.js';
 
 import { pickGid } from '@/map/clickToGid';
 import { pickGrid, MIN_GRID_ZOOM } from '@/map/gridInfo';
+import { createHoverController } from '@/map/hover';
 import { useSelectionStore } from '@/stores/selection.js';
 import { useGridStore } from '@/stores/grid.js';
 import { unByKey } from 'ol/Observable.js';
@@ -85,6 +86,7 @@ let map = null; //别放进ref OL实例不进响应式
 let clickKey = null;
 let drawing = null; // 绘制控制器（分析模式才有内容）
 let heatLayer = null; // 热力图层（类别切换时要 updateParams）
+let hover = null; // 悬停高亮控制器（探针 + 高亮层）
 
 /**
  * 把 store 里的「工具 / 半径 / 中心」同步到绘制控制器。
@@ -161,6 +163,11 @@ onMounted(() => {
   // 绘制控制器：分析图形单独一层，压在最上面（zIndex 100）
   drawing = createDrawingController(map);
 
+  // 悬停高亮：热力图格子描边 / POI 光圈 + 名称。
+  // 它是 ImageLayer（位图）唯一能"有反馈"的办法 —— 探针问服务器要几何，再自己画。
+  hover = createHoverController(map);
+  syncHover(); // 初始模式要跟当前图层状态对齐（默认 POI 可见 → 'poi'）
+
   //点击图像，将点击到的poi属性存入仓库
   const selection = useSelectionStore();
 
@@ -220,6 +227,30 @@ onMounted(() => {
 //       这里只写「值 → 地图动作」，不直接调 vue 的 watch()。
 //       好处：onBeforeUnmount 里 stopAll() 能一次清干净，
 //       要临时停某一个也用 stopById(标签)，不用满文件找。
+
+/**
+ * 悬停模式：跟着「现在屏幕上能看见什么」走。
+ *
+ *   · 分析模式        → 关闭（这时鼠标是在选中心 / 量距离，不是看设施）
+ *   · 热力图可见      → 'grid'（问格子，描一圈边框 + 显示总数）
+ *   · 否则 POI 可见   → 'poi'（问设施，画光圈 + 显示名称）
+ *   · 都不满足        → 关闭
+ *
+ * ★ 热力图与 POI 在 store 里互斥，所以这两个分支不会同时成立。
+ */
+function syncHover() {
+  if (!hover) return;
+  if (analysis.active) hover.setMode(null);
+  else if (layerStore.visible.heat) hover.setMode('grid');
+  else if (layerStore.visible.poi) hover.setMode('poi');
+  else hover.setMode(null);
+}
+
+registerWatcher(
+  'hover',
+  () => [analysis.active, layerStore.visible.heat, layerStore.visible.poi],
+  syncHover,
+);
 
 registerWatcher(
   'base',
@@ -322,6 +353,8 @@ onBeforeUnmount(() => {
   unByKey(clickKey);
   drawing?.destroy(); // 摘掉绘制交互和图形层
   drawing = null;
+  hover?.destroy(); // 摘掉 pointermove 监听与高亮层
+  hover = null;
   heatLayer = null;
   stopAll(); //解除所有图层的watch
   emit('ready', null); // 通知父组件地图已销毁

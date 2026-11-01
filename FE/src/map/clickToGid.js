@@ -1,39 +1,26 @@
-const Param = {
-  QUERY_LAYERS: 'wuhan:poi', //只有点击到点图层上的像素才有用
-  INFO_FORMAT: 'application/json', //要 JSON 不要 text/plain
-  FEATURE_COUNT: 1,
-  FI_POINT_TOLERANCE: 10, //点击容差（像素）
+import { probeFeature } from './probe';
+
+/**
+ * 点击地图 → 取被点到的 POI 的 gid。
+ *
+ * 查询本身交给 map/probe.js（和热力图共用一个探针），
+ * 这里只负责把 "poi.963" 这种 id 拆成数字 gid。
+ */
+const PARAM = {
+  QUERY_LAYERS: 'wuhan:poi', // 只有点这个图层上的像素才有用
+  FI_POINT_TOLERANCE: 10, // 点击容差（像素）：图标 36px，手指点不准时放宽一点
 };
 
-//map是OL的地图实例
-//evt是鼠标点击屏幕的区域
+/**
+ * @param {import('ol/Map').default} map
+ * @param {{ coordinate: number[] }} evt
+ * @returns {Promise<number|null>} gid；没点到 POI 返回 null
+ */
 export const pickGid = async (map, evt) => {
-  const PoiLayer = map
-    .getLayers()
-    .getArray()
-    .find((e) => e.get('id') === 'poi');
-  const source = PoiLayer.getSource(); //ImgWMS
+  const hit = await probeFeature(map, evt, 'poi', PARAM);
+  if (!hit || !hit.id) return null;
 
-  const coordinate = evt.coordinate;
-  const resolution = map.getView().getResolution();
-  const projection = map.getView().getProjection(); //'EPSG:3857'
-  const url = source.getFeatureInfoUrl(
-    coordinate,
-    resolution,
-    projection,
-    Param,
-  );
-
-  if (!url) return null; // getFeatureInfoUrl 可能返回
-
-  const res = await fetch(url);
-  if (!res.ok) return null;
-    const data = await res.json();
-    
-
-  if (!data.features || data.features.length === 0) return null;
-  console.log(data)
-  const gid = Number(String(data.features[0].id).split('.').pop());
-
+  // id 形如 "poi.963" → 963
+  const gid = Number(String(hit.id).split('.').pop());
   return Number.isInteger(gid) ? gid : null;
 };
