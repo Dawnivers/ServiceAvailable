@@ -1,0 +1,5 @@
+# ===== 依赖（本机 D:\python 3.10.10 已自带 psycopg2 与 requests，通常无需安装）=====
+# 若换机器：pip install -r requirements.txt
+# 注意用户要求：pip 缓存必须在 D 盘 → 安装前设 $env:PIP_CACHE_DIR='D:\pip-cache'
+requests>=2.31
+psycopg2-binary>=2.9

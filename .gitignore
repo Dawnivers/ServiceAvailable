@@ -1,0 +1,15 @@
+# 密钥与本地数据：绝不提交
+.env
+data/raw/
+logs/
+*.sql
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 编辑器
+.idea/
+.vscode/
