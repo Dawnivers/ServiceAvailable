@@ -28,7 +28,7 @@ import { useLayerStore } from '@/stores/layers.js';
 import { useAnalysisStore } from '@/stores/analysis.js';
 
 import { pickGid } from '@/map/clickToGid';
-import { pickGrid } from '@/map/gridInfo';
+import { pickGrid, MIN_GRID_ZOOM } from '@/map/gridInfo';
 import { useSelectionStore } from '@/stores/selection.js';
 import { useGridStore } from '@/stores/grid.js';
 import { unByKey } from 'ol/Observable.js';
@@ -174,6 +174,19 @@ onMounted(() => {
     //   pickGrid 内部会再判一次图层可见性（看不见格子就别弹卡片）。
     if (layerStore.visible.heat) {
       selection.clear(); // 别让 POI 卡和格子卡同时存在
+
+      // ★ 低缩放下不给点：一格才 1–2 像素，而且还点不准。
+      //   实测 zoom 9 时 GetFeatureInfo 返回的候选格子可能根本不在点击位置
+      //   （101px 窗口有 30 km 宽，服务端按 FEATURE_COUNT 截断）。
+     //   与其返回错数据，不如提示放大。
+      const zoom = map.getView().getZoom() ?? 0;
+      if (zoom < MIN_GRID_ZOOM) {
+        gridStore.setHint(
+          `请放大到街区级再点格子（当前 z${zoom.toFixed(1)}，需 ≥ z${MIN_GRID_ZOOM}）`,
+        );
+        return;
+      }
+
       gridStore.setLoading(true);
       try {
         const props = await pickGrid(map, evt);
@@ -181,7 +194,10 @@ onMounted(() => {
         if (props) gridStore.setInfo(props);
         else gridStore.clear();
       } catch (e) {
-        gridStore.setError('格子查询失败');
+        // 把 GeoServer 的真实报错留在控制台（例如 QUERY_LAYERS 不匹配），
+        // 界面上只给一句人话，不把 XML 异常甩给用户。
+        console.warn('[gridInfo] 查格失败：', e);
+        gridStore.setError('格子查询失败（详情见控制台）');
       }
       return;
     }

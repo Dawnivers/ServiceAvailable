@@ -1,4 +1,5 @@
-import { HEAT_LAYER } from './heatmap';
+import GeoJSON from 'ol/format/GeoJSON.js';
+import { HEAT_LAYER } from './heatmap.js';
 
 /**
  * ════════════════════════════════════════════════════════════
@@ -34,9 +35,32 @@ import { HEAT_LAYER } from './heatmap';
 const PARAM = {
   QUERY_LAYERS: HEAT_LAYER, // 只有点这个图层上的像素才有用
   INFO_FORMAT: 'application/json', // 要 JSON 不要 text/plain
-  FEATURE_COUNT: 1, // 一个像素只可能落在一个 500m 格里
-  FI_POINT_TOLERANCE: 6, // 点击容差（像素）
+  FEATURE_COUNT: 8, // 低缩放时一个像素能压住好几个格子，多要几个回来再筛
+  FI_POINT_TOLERANCE: 0, // 只查像素下那一点，不要邻近（默认容差会扩大搜索区）
 };
+
+/**
+ * 点格子的最低缩放级别。
+ *
+ * ★ 为什么必须设这个门槛（实测，2026-11-01）：
+ *   同一个坐标（江汉路格心）在不同缩放下，GetFeatureInfo 的结果会不一样：
+ *
+ *     zoom  1px 代表   返回候选数   是否命中正确格子
+ *      9     305.7 m      8 个       ❌ 返回的 8 个全在点击点西侧 2 格
+ *     10     152.9 m     6–8 个      ⚠️ 本次 3/3 命中，但候选已接近上限，可能截断
+ *     11      76.4 m     1–2 个      ✅
+ *     12–14   38–9.6 m   1–2 个      ✅
+ *
+ *   原因：GetFeatureInfo 的查询窗口固定 101×101 像素。zoom 9 时这个窗口
+ *   有 30 km 宽，覆盖几千个格子，GeoServer 按 FEATURE_COUNT 截断，
+ *   返回的只是表里靠前的几个 —— 跟点击位置无关。
+ *
+ *   所以低缩放下「点特定格子」这件事本身就没有意义（一格才 1.6 像素），
+ *   与其返回错数据，不如提示用户放大。
+ */
+export const MIN_GRID_ZOOM = 11;
+
+const geoJson = new GeoJSON();
 
 /**
  * @param {import('ol/Map').default} map
@@ -70,12 +94,45 @@ export const pickGrid = async (map, evt) => {
   const res = await fetch(url);
   if (!res.ok) return null;
 
-  const data = await res.json();
+  /**
+   * ★ 不要直接 res.json()。
+   *   GeoServer 出错时会返回 **HTTP 200 + XML 的 ServiceExceptionReport**，
+   *   此时 .json() 会抛 "Unexpected token '<'"，把真正的报错信息埋掉。
+   *   实测能碰到的例子：QUERY_LAYERS 与 LAYERS 不一致、SRS 不被支持、
+   *   BBOX 退化等 —— 都是"看起来 200 其实失败"。
+   */
+  const text = await res.text();
+  let data;
+  try {
+    data = JSON.parse(text);
+  } catch {
+    const m = text.match(/<ServiceException[^>]*>([\s\S]*?)<\/ServiceException>/);
+    throw new Error(m ? m[1].trim() : 'WMS 返回了非 JSON 响应');
+  }
 
   // 点在没有覆盖的格子上时，features 是空数组 —— 这是正常的，不是错误
   if (!data.features || data.features.length === 0) return null;
 
-  return data.features[0].properties ?? null;
+  /**
+   * ★ 必须挑「真正包含点击点」的那个，不能直接取 features[0]。
+   *
+   *   一个像素可能压住多个格子（格边界处最多 4 个），GeoServer 按什么顺序
+   *   返回没有保证。实测 zoom 9 时它返回的 8 个甚至根本不在点击位置上。
+   *
+   *   几何无需再做坐标变换：GetFeatureInfo 跟着请求里的 SRS 走，
+   *   我们传的是 view 投影（3857），回来的坐标就已经是 3857。
+   *   （这里曾写成 dataProjection:4326 去解，结果把 3857 的数值当度数，
+   *     几何范围变成 Infinity，永远判不中。）
+   */
+  for (const f of data.features) {
+    const geom = geoJson.readGeometry(f.geometry);
+    if (geom.intersectsCoordinate(evt.coordinate)) {
+      return f.properties ?? null;
+    }
+  }
+
+  // 一个都没包含：说明点落在格子边界外的空隙（理论上没有），或服务端截断了
+  return null;
 };
 
 /** 分类顺序固定成「多 → 少」，弹窗里四条按这个顺序画 */

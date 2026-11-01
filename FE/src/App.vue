@@ -343,6 +343,7 @@ const onOptionPick = (id, key) => {
     :info="grid.info"
     :loading="grid.loading"
     :error="grid.error"
+    :hint="grid.hint"
     @close="grid.clear()"
   />
 

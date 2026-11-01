@@ -21,6 +21,8 @@ const props = defineProps({
   info: { type: Object, default: null },
   loading: { type: Boolean, default: false },
   error: { type: String, default: null },
+  /** 中性提示（不是错误），比如「先放大再点格子」 */
+  hint: { type: String, default: null },
 })
 
 defineEmits(['close'])
@@ -58,7 +60,9 @@ const rows = computed(() => {
     .sort((a, b) => b.count - a.count)
 })
 
-const visible = computed(() => props.loading || props.error || props.info)
+const visible = computed(
+  () => props.loading || props.error || props.hint || props.info,
+)
 </script>
 
 <template>
@@ -77,8 +81,9 @@ const visible = computed(() => props.loading || props.error || props.info)
       </button>
     </div>
 
-    <!-- ═══ 加载 / 错误 ═══ -->
+    <!-- ═══ 加载 / 提示 / 错误 ═══ -->
     <div v-if="loading" class="state">正在查询本格…</div>
+    <div v-else-if="hint" class="state">{{ hint }}</div>
     <div v-else-if="error" class="state is-error">{{ error }}</div>
 
     <!-- ═══ 统计 ═══ -->

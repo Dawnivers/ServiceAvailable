@@ -14,6 +14,11 @@ export const useGridStore = defineStore('grid', {
     info: null,
     loading: false,
     error: null,
+    /**
+     * 中性提示，例如「先放大再点」。
+     * 和 error 分开：这不是出错，不该用红色警告的样式吓人。
+     */
+    hint: null,
   }),
 
   getters: {
@@ -30,25 +35,39 @@ export const useGridStore = defineStore('grid', {
   actions: {
     setLoading(v) {
       this.loading = v;
-      if (v) this.error = null;
+      if (v) {
+        this.error = null;
+        this.hint = null;
+      }
     },
 
-    /** 成功：存属性；顺带把 error 清掉 */
+    /** 成功：存属性；顺带把 error / hint 清掉 */
     setInfo(props) {
       this.info = props;
       this.loading = false;
       this.error = null;
+      this.hint = null;
     },
 
     setError(msg) {
       this.error = msg;
       this.info = null;
+      this.hint = null;
+      this.loading = false;
+    },
+
+    /** 中性提示：不是出错，只是「现在还点不了」 */
+    setHint(msg) {
+      this.hint = msg;
+      this.info = null;
+      this.error = null;
       this.loading = false;
     },
 
     clear() {
       this.info = null;
       this.error = null;
+      this.hint = null;
       this.loading = false;
     },
   },
