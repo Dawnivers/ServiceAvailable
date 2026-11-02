@@ -4,6 +4,7 @@ import TopBar from './components/TopBar.vue';
 import LayerPanel from './components/LayerPanel.vue';
 import AnalysisToolbar from './components/AnalysisToolbar.vue';
 import AnalysisResult from './components/AnalysisResult.vue';
+import OverlayPanel from './components/OverlayPanel.vue';
 import SqlHintBar from './components/SqlHintBar.vue';
 import PoiDetailCard from './components/PoiDetailCard.vue';
 import GridPopup from './components/GridPopup.vue';
@@ -18,6 +19,7 @@ import {
   TOOLS,
   CATEGORIES,
   RADIUS,
+  MAX_SHAPES,
 } from './stores/analysis.js';
 import { useBufferAnalysis } from './composables/useBufferAnalysis.js'
 import { splitPercent } from './utils/percent.js';
@@ -128,7 +130,9 @@ const onExitAnalysis = () => exitAnalysis()
 //  分析结果取数：中心 / 多边形 / 半径 一变就自动重查
 //  （防抖 + 去重 + 竞态都在 composable 里，组件只管渲染）
 // ════════════════════════════════════════════════════════════
-useBufferAnalysis()
+// ★ 取数器在这里挂上，同时留一个手工重试入口：
+//   后端刚重启 / 网络抖一下时，用户不该被迫"删掉一个面再画回来"才能重试。
+const { sync: syncAnalysis } = useBufferAnalysis()
 
 /**
  * 底部横幅要展示的 SQL 谓词。按当前工具决定。
@@ -140,6 +144,16 @@ useBufferAnalysis()
  */
 const sqlHint = computed(() => {
   if (!analysis.active) return null
+
+  // ★ 叠加分析用的是平面细分，一句话说不完，只报最核心那一环。
+  //   真正的语句是 ST_Node → ST_Polygonize → 反查 members，
+  //   比简单地"两个面求交"要绕，值得单独说明。
+  if (analysis.overlay) {
+    return {
+      fn: 'ST_Polygonize',
+      args: '(ST_Node(ST_Collect(ST_Boundary(geom))))',
+    }
+  }
 
   if (analysis.tool === 'measure') {
     return { note: '前端 getLength() 计算，未请求后端' }
@@ -251,6 +265,30 @@ const onToolChange = (t) => analysis.setTool(t)
 const onRadiusChange = (v) => analysis.setRadius(v)
 const onCategoryToggle = (k) => analysis.toggleCategory(k)
 
+// ── 叠加分析 ────────────────────────────────────────────────
+/** 开关叠加模式。打开会清掉单图形那一套（圆心/多边形/结果），反之亦然 */
+const onToggleOverlay = () => analysis.toggleOverlay()
+/** 面板里删掉一个面；字母与颜色会自动重排（见 store.removeShape） */
+const onShapeRemove = (id) => analysis.removeShape(id)
+/** 点中一个面：地图上高亮并定位，再点一次取消 */
+const onShapeSelect = (id) => analysis.toggleShapeSelected(id)
+const onShapeClear = () => analysis.clearShapes()
+/** 重试：先清错误让 spinner 出来，再让取数器重新发一次（失败时指纹已清，不会被去重挡） */
+const onOverlayRetry = () => {
+  analysis.setOverlayError(null)
+  syncAnalysis()
+}
+
+/**
+ * 当前「还能用半径滑杆调」的那个面的字母，给工具栏显示「调 A」。
+ * ★ activeShapeId 是 store 里唯一的真相：画完一个圆它成为 active，
+ *   画下一笔（圆或多边形）就顶掉，滑杆随即失去作用。
+ */
+const activeShapeLabel = computed(() => {
+  const s = analysis.shapes.find((x) => x.id === analysis.activeShapeId)
+  return s ? s.label : null
+})
+
 const layers = computed(() =>
   LAYER.map(d => ({
     ...d,                                  // id / name / tag
@@ -307,15 +345,35 @@ const onOptionPick = (id, key) => {
     :radius-range="RADIUS"
     :center="analysis.center"
     :needs-radius="analysis.needsRadius"
+    :overlay="analysis.overlay"
+    :shape-count="analysis.shapes.length"
+    :max-shapes="MAX_SHAPES"
+    :active-label="activeShapeLabel"
     @update:tool="onToolChange"
     @update:radius="onRadiusChange"
     @toggle-category="onCategoryToggle"
+    @toggle-overlay="onToggleOverlay"
     @exit="onExitAnalysis"
   />
 
-  <!-- 右上：分析结果卡（只在分析模式出现） -->
+  <!-- 右上：分析结果卡（只在分析模式出现）
+       ★ 叠加模式下换成 OverlayPanel：那一块要展示面列表 + 并集/交集/重叠度，
+         和「单个圆/多边形的可达性结果」是两种信息结构，硬塞进一张卡会打架 -->
+  <OverlayPanel
+    v-if="analysis.active && analysis.overlay"
+    :shapes="analysis.shapes"
+    :result="analysis.overlayResult"
+    :loading="analysis.overlayLoading"
+    :error="analysis.overlayError"
+    :max-shapes="MAX_SHAPES"
+    :selected="analysis.shapeSelected"
+    @remove="onShapeRemove"
+    @select="onShapeSelect"
+    @clear="onShapeClear"
+    @retry="onOverlayRetry"
+  />
   <AnalysisResult
-    v-if="analysis.active"
+    v-else-if="analysis.active"
     :result="analysis.displayResult"
     :loading="analysis.resultLoading"
     :error="analysis.resultError"
@@ -362,11 +420,19 @@ const onOptionPick = (id, key) => {
   <SqlHintBar
     v-else
     :sql="sqlHint"
-    :ms="analysis.resultMs"
-    :count="analysis.displayResult?.count ?? null"
-    :raw-count="analysis.result?.count ?? null"
-    :loading="analysis.resultLoading"
-    :error="analysis.resultError"
+    :ms="analysis.overlay ? analysis.overlayMs : analysis.resultMs"
+    :count="
+      analysis.overlay
+        ? (analysis.overlayResult?.union?.poi ?? null)
+        : (analysis.displayResult?.count ?? null)
+    "
+    :raw-count="
+      analysis.overlay
+        ? (analysis.overlayResult?.union?.poi ?? null)
+        : (analysis.result?.count ?? null)
+    "
+    :loading="analysis.overlay ? analysis.overlayLoading : analysis.resultLoading"
+    :error="analysis.overlay ? analysis.overlayError : analysis.resultError"
   />
 
   <!-- 右下：比例尺 + 坐标读数（需要 map 实例） -->

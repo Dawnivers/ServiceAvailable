@@ -99,6 +99,10 @@ let hover = null; // 悬停高亮控制器（探针 + 高亮层）
 function syncDrawing() {
   if (!drawing) return;
 
+  // ★ 叠加开关要**最先**同步：它决定 setTool 换工具时清不清场。
+  //   若放在 setTool 之后，切工具那一下还会按老状态清空一次。
+  drawing.setOverlay(analysis.overlay);
+
   if (!analysis.active) {
     drawing.setTool(null);
     drawing.clear();
@@ -116,6 +120,19 @@ function syncDrawing() {
     onPolygon: ({ wkt, areaKm2 }) => analysis.setGeometry({ wkt, areaKm2 }),
     // 测距：只在地图上留一条线和长度标签
     onMeasure: ({ meters }) => analysis.setMeasure(meters),
+    // 叠加：每画完一个面就追加进 shapes（不清场）。字母/颜色由 store 分配，
+    // 分配完 store 会触发 overlayShapes watcher，再由 applyShapeMeta 回写到地图。
+    onShape: (shape) => {
+      const ok = analysis.addShape(shape);
+      if (!ok) {
+        // 已经 6 个了（或被去重挡下）：store 没收，地图上也不该留这个面。
+        // ★ 推到下一拍：Draw 是在 dispatchEvent('drawend') **之后**才把要素加进
+        //   source 的，此刻 removeFeature 还删不到它（和 paintCircle 那个坑同源）。
+        setTimeout(() => drawing?.applyShapeMeta(analysis.shapes), 0);
+      }
+    },
+    // 拖半径滑杆时 drawing 实时重建圆的几何，这里只负责把新半径/面积写回 store
+    onShapeRadius: ({ id, radius, areaKm2 }) => analysis.updateShapeRadius(id, radius, areaKm2),
   });
 
   drawing.setRadius(analysis.radius);
@@ -306,17 +323,69 @@ registerWatcher(
 );
 
 // 进入/退出分析模式、换工具、拖滑杆、卡片带中心进来 —— 都走这一条同步
+// ★ overlay 也在这里：它决定 setTool 换工具时清不清场，必须和 setTool 同一拍
 registerWatcher(
   'drawing',
-  () => [analysis.active, analysis.tool, analysis.radius, analysis.center],
+  () => [analysis.active, analysis.tool, analysis.radius, analysis.center, analysis.overlay],
   syncDrawing,
   { deep: true, flush: 'post' },
 );
 
 // 换工具时把上一个工具的产物清掉（否则地图上会堆一堆图形）
+// ★ 叠加模式由 store 的 clearSketch 自己判断：那种模式下换工具**不清面**，
+//   否则画到第 3 个想换个画法，前两个就没了。
 registerWatcher('drawingTool', () => analysis.tool, () => {
   analysis.clearSketch();
 });
+
+/**
+ * 叠加面列表变化 → 同步到地图。
+ *
+ * 三件事一次做完（见 drawing.applyShapeMeta）：
+ *   ① 面板里删掉的面从地图上移除
+ *   ② 剩下的更新字母与颜色（删掉中间一个后，后面的会重排 A/B/C）
+ *   ③ 新加的面补上颜色
+ * ★ 必须 deep：改 color/label 是**改对象属性**，浅监听看不到。
+ */
+registerWatcher(
+  'overlayShapes',
+  () => analysis.shapes,
+  (list) => drawing?.applyShapeMeta(list),
+  { deep: true, flush: 'post' },
+);
+
+/** 面板里点中某个面 → 高亮 + 镜头飞过去（焦点变化才动镜头，避免抖动） */
+registerWatcher(
+  'overlaySelected',
+  () => analysis.shapeSelected,
+  (id) => drawing?.focusShape(id ?? null),
+);
+
+/**
+ * 哪个圆「还可以用半径滑杆调」。
+ * ★ store 是唯一真相：画完一个圆它成为 active，画下一笔（圆或多边形）就顶掉。
+ *   drawing 只负责把 active 标记刷到要素上（虚线 = 可调，实线 = 已锁定）。
+ */
+registerWatcher(
+  'overlayActiveShape',
+  () => analysis.activeShapeId,
+  (id) => drawing?.setActiveShape(id ?? null),
+);
+
+/**
+ * 叠加结果几何 → 画到「按重叠度着色」的那一层。
+ * ★ 后端 ST_AsGeoJSON 出来是 4326，drawing 里会转 3857；
+ *   而悬停高亮那边恰恰相反（几何跟着请求的 SRS 走，不能再转），别写混。
+ */
+registerWatcher(
+  'overlayResult',
+  () => analysis.overlayResult,
+  (r) => {
+    if (r?.geometry?.features?.length) drawing?.setOverlayResult(r.geometry);
+    else drawing?.clearOverlayResult();
+  },
+  { flush: 'post' },
+);
 
 /**
  * 点选后把镜头拉到「缓冲圈看得见」的级别。

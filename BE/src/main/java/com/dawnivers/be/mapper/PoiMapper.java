@@ -37,4 +37,15 @@ public interface PoiMapper {
     /** 多边形内距形心最近的 N 条（带 gid，供前端点回详情） */
     List<WithinItem> itemsWithin(@Param("wkt") String wkt,
                                  @Param("limit") int limit);
+
+    // ── 服务于 /api/poi/overlay（多面叠加分析）──────────────────────
+    /**
+     * 一次平面细分，返回并集 / 交集 / 按重叠度 / 各地块 的完整统计。
+     *
+     * ★ 入参是 service 校验过、Jackson 序列化好的 JSON 数组字符串，
+     *   SQL 里 cast(? as jsonb) 展开成行 —— 这样面数可变也不用拼 SQL。
+     * ★ 返回 String 而不是 JsonNode：MyBatis 没有 JsonNode 的 TypeHandler，
+     *   契约转换（readTree）统一放在 service 里做，和 AreaService.getAreas 同一手法。
+     */
+    String overlay(@Param("shapesJson") String shapesJson);
 }

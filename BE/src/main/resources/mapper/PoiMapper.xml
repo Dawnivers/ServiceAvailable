@@ -205,4 +205,189 @@
     limit #{limit}
 </select>
 
+<!-- ══════════════════════════════════════════════════════════════
+     /api/poi/overlay —— 多面叠加分析（面-面）
+
+     ★ 核心不是「两两 ST_Intersection」，而是**平面细分**：
+         ① ST_Boundary   取每个面的边界线
+         ② ST_Node       在所有交点处打断（noding）
+         ③ ST_Polygonize 把线段围成一个个「原子面」（互不重叠）
+         ④ 反查每个原子面被哪几个原始面包含 → members / deg
+
+       这样两重区、三重区各出现且**只出现一次**。
+       若改成两两求交，三重重叠区会被算 3 次 —— 面积虚报 40%（实测 21 vs 15）。
+
+     ★ 组合数是 2^n-1（6 个面 = 63），人不该读枚举，
+       所以对外只给「按重叠度分组」（deg 1..n），这才是真实场景的用法。
+
+     ★ 面积一律 ::geography（地面平方米）：
+       ST_Area(geom) 的单位是「平方度」，武汉 1° ≈ 111 km，数字毫无意义。
+     ★ round(double precision, int) 在 PG 里不存在，必须先 ::numeric。
+
+     ★ 细缝（sliver）：两个几乎相切的圆会切出 1–2 m 宽的碎片，
+       用 ST_Area(...::geography) > 1 扔掉。真实重叠区不会小于 1 m²。
+     ══════════════════════════════════════════════════════════════ -->
+<select id="overlay" resultType="java.lang.String">
+WITH
+-- ① 入参：JSON 数组 → 每个面一行；圆由 ST_Buffer(::geography) 生成地面正圆
+src AS (
+    SELECT
+        s->>'id'   AS id,
+        s->>'name' AS name,
+        s->>'kind' AS kind,
+        CASE
+            WHEN (s->>'kind') = 'circle' THEN
+                ST_Buffer(
+                    ST_SetSRID(ST_MakePoint((s->>'lon')::float8, (s->>'lat')::float8), 4326)::geography,
+                    (s->>'radius')::float8
+                )::geometry
+            ELSE ST_GeomFromText(s->>'wkt', 4326)
+        END AS geom
+    FROM jsonb_array_elements(cast(#{shapesJson} as jsonb)) AS s
+),
+
+-- ② 归一化：手绘几何可能自相交，ST_IsValid 先判断、非法才修（比无条件 MakeValid 便宜）
+-- ★ MakeValid 修「领结形」自相交时会返回 **MultiPolygon / GeometryCollection**
+--   （一个面被拆成两块），所以必须 ST_CollectionExtract(..., 3) 只留面：
+--   直接把 GeometryCollection 交给 ST_Boundary/ST_Node 会报
+--   "lwgeom_collect_endpoints: invalid type GeometryCollection"（实测踩过）。
+-- ★ 退化几何修完可能是空的，必须过滤，否则后面求边界得到空几何。
+valid AS (
+    SELECT id, name, kind, geom
+    FROM (
+        SELECT id, name, kind,
+               CASE WHEN ST_IsValid(g) THEN g
+                    ELSE ST_CollectionExtract(ST_MakeValid(g), 3) END AS geom
+        FROM (
+            SELECT id, name, kind, ST_Force2D(geom) AS g
+            FROM src
+            WHERE geom IS NOT NULL
+        ) t
+    ) u
+    WHERE geom IS NOT NULL
+      AND NOT ST_IsEmpty(geom)
+),
+
+cfg AS (SELECT count(*) AS n FROM valid),
+
+-- ③ 平面细分三步：边界 → 打节点 → 面化
+-- ★ ST_Collect 遇到「LineString + MultiLineString」混合会返回 GeometryCollection，
+--   而 ST_Node 不接受 GeometryCollection。用 ST_CollectionExtract(..., 2)
+--   把它压平成 MultiLineString —— 一个自相交面被拆成多块时就一定会走到这条路。
+noded AS (
+    SELECT ST_Node(ST_CollectionExtract(ST_Collect(ST_Boundary(geom)), 2)) AS g
+    FROM valid
+),
+faces AS (
+    SELECT (ST_Dump(ST_Polygonize(g))).geom AS g FROM noded
+),
+
+-- ④ 每个原子面归属哪几个原始面（用严格内部点判包含，避免边界抖动）
+tagged AS (
+    SELECT
+        f.g,
+        ARRAY(
+            SELECT v.id FROM valid v
+            WHERE ST_Contains(v.geom, ST_PointOnSurface(f.g))
+            ORDER BY v.id
+        ) AS members
+    FROM faces f
+),
+
+atom AS (
+    SELECT g, members, cardinality(members) AS deg
+    FROM tagged
+    WHERE cardinality(members) > 0
+      AND ST_Area(g::geography) > 1
+),
+
+-- ⑤ 并集（全部原子面合并）与 交集（被 n 个面同时覆盖）
+-- ★ CTE 名不能叫 full：FULL 是 SQL 保留字（FULL JOIN），PG 会直接语法错误。
+whole  AS (SELECT ST_Union(g) AS g FROM atom),
+common AS (SELECT ST_Union(g) AS g FROM atom WHERE deg = (SELECT n FROM cfg))
+
+SELECT json_build_object(
+    'shapeCount', (SELECT n FROM cfg),
+
+    ---------------------------------------------------------------- 并集
+    'union', (
+        SELECT json_build_object(
+            'areaKm2', round((coalesce(ST_Area(w.g::geography), 0) / 1000000)::numeric, 3),
+            'poi', (SELECT count(*) FROM poi p
+                    WHERE w.g IS NOT NULL AND ST_Contains(w.g, p.geom)),
+            'byCategory', (
+                SELECT coalesce(jsonb_object_agg(c.category, c.cnt), '{}'::jsonb)
+                FROM (
+                    SELECT p.category, count(*) AS cnt
+                    FROM poi p, whole w2
+                    WHERE w2.g IS NOT NULL AND ST_Contains(w2.g, p.geom)
+                    GROUP BY p.category
+                ) c
+            )
+        )
+        FROM whole w
+    ),
+
+    ---------------------------------------------------------------- 交集（全部 N 个面）
+    'intersect', (
+        SELECT json_build_object(
+            'empty',   (f.g IS NULL OR ST_IsEmpty(f.g)),
+            'areaKm2', round((coalesce(ST_Area(f.g::geography), 0) / 1000000)::numeric, 3),
+            'poi',     (SELECT count(*) FROM poi p
+                        WHERE f.g IS NOT NULL AND ST_Contains(f.g, p.geom))
+        )
+        FROM common f
+    ),
+
+    ---------------------------------------------------------------- 按重叠度（真实场景的主输出）
+    'byDegree', (
+        SELECT coalesce(json_agg(json_build_object(
+                   'deg',     d.deg,
+                   'faceCnt', d.face_cnt,
+                   'areaKm2', d.area_km2,
+                   'poi',     (SELECT count(*) FROM poi p
+                               WHERE ST_Contains(d.ug, p.geom))
+               ) ORDER BY d.deg), '[]'::json)
+        FROM (
+            SELECT deg,
+                   count(*) AS face_cnt,
+                   ST_Union(g) AS ug,
+                   round((sum(ST_Area(g::geography)) / 1000000)::numeric, 3) AS area_km2
+            FROM atom
+            GROUP BY deg
+        ) d
+    ),
+
+    ---------------------------------------------------------------- 每个面各自的量（面板列表用）
+    'shapes', (
+        SELECT coalesce(json_agg(json_build_object(
+                   'id',      v.id,
+                   'name',    v.name,
+                   'kind',    v.kind,
+                   'areaKm2', round((ST_Area(v.geom::geography) / 1000000)::numeric, 3),
+                   'poi',     (SELECT count(*) FROM poi p WHERE ST_Contains(v.geom, p.geom))
+               ) ORDER BY v.id), '[]'::json)
+        FROM valid v
+    ),
+
+    ---------------------------------------------------------------- 几何：原子面 + 它的度数
+    -- ★ properties.deg 让前端按重叠度上色；members 供「2 面重叠是哪两个」的明细
+    -- ★ SimplifyPreserveTopology 容差约 1.1 m，低于任何缩放级别的视觉分辨率，只减体积不改形状
+    'geometry', (
+        SELECT json_build_object(
+            'type', 'FeatureCollection',
+            'features', coalesce(json_agg(json_build_object(
+                'type', 'Feature',
+                'properties', json_build_object(
+                    'deg',     a.deg,
+                    'members', to_json(a.members)
+                ),
+                'geometry', ST_AsGeoJSON(ST_SimplifyPreserveTopology(a.g, 0.00001), 6)::json
+            ) ORDER BY a.deg, ST_Area(a.g::geography) DESC), '[]'::json)
+        )
+        FROM atom a
+    )
+);
+</select>
+
 </mapper>

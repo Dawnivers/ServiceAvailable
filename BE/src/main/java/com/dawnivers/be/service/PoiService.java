@@ -17,15 +17,27 @@ import com.dawnivers.be.dto.CategoryCount;
 import com.dawnivers.be.dto.LonLat;
 import com.dawnivers.be.dto.NearbyDto;
 import com.dawnivers.be.dto.NearestDto;
+import com.dawnivers.be.dto.OverlayReq;
 import com.dawnivers.be.dto.PoiDto;
 import com.dawnivers.be.dto.WithinDto;
 import com.dawnivers.be.dto.WithinItem;
 import com.dawnivers.be.dto.WktInfoDto;
 
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
+
 @Service
 public class PoiService {
     private final PoiMapper poiMapper;
-    public PoiService(PoiMapper poiMapper) { this.poiMapper = poiMapper; }
+
+    /** 和 AreaService 一样：JSON 文本 ↔ JsonNode 的契约转换交给它 */
+    private final ObjectMapper objectMapper;
+
+    public PoiService(PoiMapper poiMapper, ObjectMapper objectMapper) {
+        this.poiMapper = poiMapper;
+        this.objectMapper = objectMapper;
+    }
 
     public PoiDto getByGid(long gid) {
         PoiDto dto = poiMapper.selectByGid(gid);
@@ -126,6 +138,112 @@ public class PoiService {
 
         return new WithinDto(total, round2(areaKm2), new LonLat(info.lon(), info.lat()),
                 byCategory, items);
+    }
+
+    // ════════════════════════════════════════════════════════════
+    //  overlay —— 多面叠加分析（面-面求交 + 重叠度）
+    // ════════════════════════════════════════════════════════════
+
+    /** 少于 2 个面没有「叠加」可言 */
+    private static final int MIN_SHAPES = 2;
+
+    /**
+     * 上限 6 个。
+     * ★ 不是性能限制（平面细分布局很小），是**人眼限制**：
+     *   组合数是 2^n-1，7 个面就有 127 种组合，谁看都晕。
+     *   真实叠加分析通常 2–4 个面。
+     */
+    private static final int MAX_SHAPES = 6;
+
+    /** 半径区间与前端滑杆一致（100–2000），前后端各留一点余量 */
+    private static final double MIN_RADIUS_M = 50.0;
+    private static final double MAX_RADIUS_M = 5000.0;
+
+    /**
+     * 多面叠加分析。
+     *
+     * ★ 校验放在 service、几何运算放在 SQL，和 within 同一分工。
+     * ★ 但**没有**做 within 那样的 ST_IsValid 体检：
+     *   叠加是「用户边画边加」的多面场景，一个手抖的自相交面不该让整批 6 个面全 400。
+     *   SQL 里用 CASE WHEN ST_IsValid THEN geom ELSE ST_MakeValid(geom) 就地修正。
+     */
+    public JsonNode overlay(List<OverlayReq.Shape> shapes) {
+        // ① 数量
+        if (shapes == null || shapes.size() < MIN_SHAPES) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "at least " + MIN_SHAPES + " shapes are required");
+        }
+        if (shapes.size() > MAX_SHAPES) {
+            throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
+                    "at most " + MAX_SHAPES + " shapes are allowed, got " + shapes.size());
+        }
+
+        // ② 逐个校验（错误信息带下标，前端能定位到是第几个面）
+        for (int i = 0; i < shapes.size(); i++) {
+            OverlayReq.Shape s = shapes.get(i);
+            String tag = "shapes[" + i + "]";
+            if (s == null) {
+                throw badRequest(tag + " must not be null");
+            }
+
+            String kind = s.kind() == null ? "" : s.kind().trim();
+            if ("circle".equals(kind)) {
+                if (s.lon() == null || s.lat() == null || s.radius() == null) {
+                    throw badRequest(tag + ": circle needs lon / lat / radius");
+                }
+                if (s.lon() < -180 || s.lon() > 180) {
+                    throw badRequest(tag + ".lon must be in [-180, 180], got " + s.lon());
+                }
+                if (s.lat() < -90 || s.lat() > 90) {
+                    throw badRequest(tag + ".lat must be in [-90, 90], got " + s.lat());
+                }
+                if (s.radius() <= MIN_RADIUS_M || s.radius() > MAX_RADIUS_M) {
+                    throw badRequest(tag + ".radius must be in (" + (int) MIN_RADIUS_M
+                            + ", " + (int) MAX_RADIUS_M + "], got " + s.radius());
+                }
+            } else if ("area".equals(kind)) {
+                String w = s.wkt() == null ? "" : s.wkt().trim();
+                if (w.isEmpty()) {
+                    throw badRequest(tag + ".wkt is required when kind=area");
+                }
+                if (w.length() > MAX_WKT_CHARS) {
+                    throw badRequest(tag + ".wkt too long: " + w.length()
+                            + " chars, max " + MAX_WKT_CHARS);
+                }
+                if (!WKT_POLYGON.matcher(w).matches()) {
+                    throw badRequest(tag + ".wkt must be POLYGON(...) or MULTIPOLYGON(...)");
+                }
+            } else {
+                throw badRequest(tag + ".kind must be 'area' or 'circle', got '" + kind + "'");
+            }
+        }
+
+        // ③ 序列化后交给 SQL（不拼 SQL，全部走 #{} 参数化）
+        String json;
+        try {
+            json = objectMapper.writeValueAsString(shapes);
+        } catch (JsonProcessingException e) {
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR,
+                    "cannot encode shapes", e);
+        }
+
+        String raw = poiMapper.overlay(json);
+        if (raw == null) {
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR,
+                    "overlay query returned nothing");
+        }
+
+        // ④ 契约转换：String → JsonNode（与 /api/areas 一致）
+        try {
+            return objectMapper.readTree(raw);
+        } catch (JsonProcessingException e) {
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR,
+                    "cannot parse overlay result", e);
+        }
+    }
+
+    private static ResponseStatusException badRequest(String msg) {
+        return new ResponseStatusException(HttpStatus.BAD_REQUEST, msg);
     }
 
     /** 保留 2 位小数。用 BigDecimal，别用 double 直接四舍五入 */

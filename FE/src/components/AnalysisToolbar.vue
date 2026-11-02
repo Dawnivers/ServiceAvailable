@@ -47,18 +47,28 @@ const props = defineProps({
   center: { type: Object, default: null },
   // 测距模式下半径/类别无效
   needsRadius: { type: Boolean, default: true },
+
+  // ── 叠加分析 ──
+  overlay: { type: Boolean, default: false },
+  shapeCount: { type: Number, default: 0 },
+  maxShapes: { type: Number, default: 6 },
+  // 当前还能用滑杆调半径的那个面（"A"）；null = 没有可调的圆
+  activeLabel: { type: String, default: null },
 })
 
 const emit = defineEmits([
   'update:tool',
   'update:radius',
   'toggle-category',
+  'toggle-overlay',
   'exit', // 退出分析模式
 ])
 
 // ── 3. 派生 ─────────────────────────────────────────────────
 /** 当前工具的中文名，标题右侧「点选模式」 */
 function modeText() {
+  // 叠加是「跨工具」的模式，不是某个具体画法，所以单独报一个名字
+  if (props.overlay) return '叠加分析'
   const t = props.tools.find((x) => x.key === props.tool)
   return `${t?.label ?? '点选'}模式`
 }
@@ -78,9 +88,28 @@ function centerText() {
   return name ? `中心：${name}` : '中心：已选点'
 }
 
+/**
+ * 底部提示：叠加模式下汇报「画了几个面」，否则还是原来的中心提示。
+ * ★ 0 个面和 1 个面要分开说 —— 只画 1 个时结果区是空的，
+ *   不提示"再画一个"用户会以为功能坏了。
+ */
+function footText() {
+  if (!props.overlay) return centerText()
+  if (props.shapeCount === 0) return `用上方工具画 2–${props.maxShapes} 个面`
+  if (props.shapeCount === 1) return '再画 1 个面才能开始叠加'
+  return `已画 ${props.shapeCount} 个面 · 最多 ${props.maxShapes} 个`
+}
+
+/** 底部提示的高亮条件：叠加模式下面数够 2 个才算"有内容" */
+function footActive() {
+  return props.overlay ? props.shapeCount >= 2 : !!props.center
+}
+
 // ── 4. 事件 ─────────────────────────────────────────────────
 const onTool = (key) => {
   if (key === props.tool) return
+  // 叠加模式下没有「测距」：它不出统计，也没有面可以加
+  if (props.overlay && key === 'measure') return
   emit('update:tool', key)
 }
 
@@ -88,6 +117,7 @@ const onRadius = (e) => emit('update:radius', Number(e.target.value))
 
 const onCategory = (key) => {
   if (!props.needsRadius) return // 测距模式下类别无效
+  if (props.overlay) return // 叠加模式固定统计全部类别
   emit('toggle-category', key)
 }
 </script>
@@ -109,9 +139,9 @@ const onCategory = (key) => {
         v-for="t in tools"
         :key="t.key"
         class="tp-tool"
-        :class="{ 'is-active': t.key === tool }"
+        :class="{ 'is-active': t.key === tool, 'is-muted': overlay && t.key === 'measure' }"
         type="button"
-        :title="t.label"
+        :title="t.title || t.label"
         @click="onTool(t.key)"
       >
         <svg class="tp-icon" viewBox="0 0 24 24" width="15" height="15" aria-hidden="true">
@@ -122,9 +152,36 @@ const onCategory = (key) => {
       </button>
     </div>
 
+    <!-- ═══ 叠加分析开关 ═══
+         做成开关而不是第 5 个工具：叠加是「画多个」的策略，
+         和「用矩形画 / 用自由绘制画 / 点选画」是两个维度。
+         塞进工具组会和 rect/freehand 语义打架（选了叠加就画不了矩形）。 -->
+    <button
+      class="tp-overlay"
+      :class="{ 'is-on': overlay }"
+      type="button"
+      :aria-pressed="overlay ? 'true' : 'false'"
+      :title="overlay ? '关闭叠加分析（会清空已画的面）' : '开启叠加分析：连续画多个面并求交'"
+      @click="emit('toggle-overlay')"
+    >
+      <svg class="tp-overlay-icon" viewBox="0 0 24 24" width="14" height="14" aria-hidden="true">
+        <circle cx="9.5" cy="12" r="6" fill="none" stroke="currentColor" stroke-width="1.6" />
+        <circle cx="14.5" cy="12" r="6" fill="none" stroke="currentColor" stroke-width="1.6" />
+      </svg>
+      <span class="tp-overlay-label">叠加分析</span>
+      <span class="tp-overlay-meta">
+        {{ overlay ? `${shapeCount} / ${maxShapes}` : '多面求交' }}
+      </span>
+    </button>
+
     <!-- ═══ 缓冲区半径 ═══ -->
     <div class="tp-block" :class="{ 'is-off': !needsRadius }">
-      <div class="tp-block-title">缓冲区半径</div>
+      <div class="tp-block-title">
+        缓冲区半径
+        <!-- 叠加模式下必须说清"这一下滑杆调的是哪个圆"：
+             只有刚画完、还没被下一笔顶掉的那个圆是可调的，锁定的一律实线 -->
+        <span v-if="overlay && activeLabel" class="tp-block-tag">调 {{ activeLabel }}</span>
+      </div>
 
       <input
         class="tp-range"
@@ -147,8 +204,14 @@ const onCategory = (key) => {
       </div>
     </div>
 
-    <!-- ═══ 参与统计的类别 ═══ -->
-    <div class="tp-block" :class="{ 'is-off': !needsRadius }">
+    <!-- ═══ 参与统计的类别 ═══
+         叠加模式下置灰：叠加结果按「重叠度」分组，四个类别只出合计，
+         没有"按类别筛选"的语义，留着可点就成了假开关。 -->
+    <div
+      class="tp-block"
+      :class="{ 'is-off': !needsRadius || overlay }"
+      :title="overlay ? '叠加结果固定统计全部类别' : ''"
+    >
       <div class="tp-block-title">参与统计的类别</div>
       <label
         v-for="c in categoryList"
@@ -157,7 +220,12 @@ const onCategory = (key) => {
         :class="{ 'is-unchecked': !categories[c.key] }"
         @click.prevent="onCategory(c.key)"
       >
-        <input class="tp-cb-input" type="checkbox" :checked="categories[c.key]" :disabled="!needsRadius" />
+        <input
+          class="tp-cb-input"
+          type="checkbox"
+          :checked="categories[c.key]"
+          :disabled="!needsRadius || overlay"
+        />
         <span class="tp-cb" :style="{ '--c': c.color }">
           <svg viewBox="0 0 12 12" width="9" height="9" aria-hidden="true">
             <path d="M1.5 6.2 4.4 9 10.5 2.6" fill="none" stroke="#fff" stroke-width="2"
@@ -168,9 +236,9 @@ const onCategory = (key) => {
       </label>
     </div>
 
-    <!-- ═══ 底部：中心提示 ═══ -->
-    <div class="tp-foot" :class="{ 'has-center': !!center }">
-      {{ centerText() }}
+    <!-- ═══ 底部：中心提示 / 面数提示 ═══ -->
+    <div class="tp-foot" :class="{ 'has-center': footActive() }">
+      {{ footText() }}
     </div>
   </div>
 </template>
@@ -270,6 +338,58 @@ const onCategory = (key) => {
   white-space: nowrap;
   letter-spacing: -0.3px; /* 4 字标签在 48px 格子里要挤一点 */
 }
+/* 叠加模式下测距无效：压淡但保留位置，别让工具组重排 */
+.tp-tool.is-muted {
+  opacity: 0.32;
+  cursor: not-allowed;
+}
+
+/* ═══ 叠加分析开关 ═══ */
+.tp-overlay {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  width: calc(100% - 24px);
+  margin: 0 12px 12px;
+  padding: 7px 9px;
+  border: 1px solid #e3eaf2;
+  border-radius: 8px;
+  background: #fff;
+  color: #5b7288;
+  font-family: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s, background 0.15s;
+}
+.tp-overlay:hover {
+  border-color: #b7c7d6;
+  color: #2b4359;
+}
+/* 开启态：和分析态同一套红，一眼看出"现在在另一种模式里" */
+.tp-overlay.is-on {
+  border-color: #d93025;
+  background: #fdf2f1;
+  color: #d93025;
+  font-weight: 700;
+}
+.tp-overlay-icon {
+  flex: none;
+}
+.tp-overlay-label {
+  flex: 1;
+  text-align: left;
+}
+.tp-overlay-meta {
+  flex: none;
+  font-size: 10px;
+  font-weight: 400;
+  color: #a8bccd;
+  font-variant-numeric: tabular-nums;
+}
+.tp-overlay.is-on .tp-overlay-meta {
+  color: #d93025;
+  opacity: 0.75;
+}
 
 /* ═══ 区块（半径 / 类别） ═══ */
 .tp-block {
@@ -286,6 +406,17 @@ const onCategory = (key) => {
   font-size: 10.5px;
   color: #9aaec1;
   margin-bottom: 6px;
+}
+/* 「调 A」小标签：跟着分析态红，和可调圆的虚线描边呼应 */
+.tp-block-tag {
+  margin-left: 5px;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: #fdf2f1;
+  color: #d93025;
+  font-size: 9.5px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
 }
 
 /* ═══ 半径滑杆 ═══ */

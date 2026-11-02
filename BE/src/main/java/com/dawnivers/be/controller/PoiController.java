@@ -3,15 +3,19 @@ package com.dawnivers.be.controller;
 import org.springframework.http.HttpStatus;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.server.ResponseStatusException;
 
 import com.dawnivers.be.dto.NearbyDto;
+import com.dawnivers.be.dto.OverlayReq;
 import com.dawnivers.be.dto.PoiDto;
 import com.dawnivers.be.dto.WithinDto;
 import com.dawnivers.be.service.PoiService;
+import com.fasterxml.jackson.databind.JsonNode;
 
 @RestController
 @RequestMapping("/api/poi")
@@ -77,5 +81,31 @@ public class PoiController {
         }
 
         return poiService.within(wkt, limit);
+    }
+
+    /**
+     * 多面叠加分析（面-面求交 + 按重叠度统计）。
+     *
+     * <pre>
+     *   POST /api/poi/overlay
+     *   { "shapes": [
+     *       { "id":"s1", "name":"A", "kind":"area",   "wkt":"POLYGON((...))" },
+     *       { "id":"s2", "name":"B", "kind":"circle", "lon":114.3, "lat":30.55, "radius":800 }
+     *   ] }
+     * </pre>
+     *
+     * ★ 为什么这里换成 POST + JSON body，而 /within 还是 GET：
+     *   ① 面数最多 6 个，每个手绘面动辄几百个顶点，
+     *      拼进请求行会撞 Tomcat 默认 8KB 的上限；
+     *   ② WKT 里的 "+" 在 query string 会被解成空格，编码层面也不省心。
+     *   单个面（/within）用 G E T 仍够用，也符合"读操作"语义。
+     *
+     * ★ 返回 JsonNode 而不是 DTO：结果里有「面列表」「重叠度列表」「GeoJSON 几何」
+     *   三块结构完全不同的数据，用嵌套 record 反而比 JSON 更啰嗦。
+     *   SQL 里 json_build_object 一次拼好，这里透传（与 /api/areas 同一手法）。
+     */
+    @PostMapping("/overlay")
+    public JsonNode overlay(@RequestBody(required = false) OverlayReq req) {
+        return poiService.overlay(req == null ? null : req.shapes());
     }
 }
