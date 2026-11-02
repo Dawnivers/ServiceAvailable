@@ -39,9 +39,11 @@ const props = defineProps({
   maxShapes: { type: Number, default: 6 },
   // 当前在地图上高亮的面 id
   selected: { type: String, default: null },
+  // 导出中：要额外拉一次设施明细，期间按钮显示「导出中…」
+  exporting: { type: Boolean, default: false },
 })
 
-const emit = defineEmits(['remove', 'select', 'clear', 'retry'])
+const emit = defineEmits(['remove', 'select', 'clear', 'retry', 'export'])
 
 // ── 派生 ───────────────────────────────────────────────────
 const union = computed(() => props.result?.union ?? null)
@@ -212,9 +214,20 @@ function shapeSub(s) {
       </div>
     </template>
 
-    <!-- ═══ 清空 ═══ -->
+    <!-- ═══ 底部动作 ═══
+         ★ 导出跟着 result 走：还在算 / 报错时没有数字可导，按钮置灰。
+           清空跟着 shapes 走：没画过面就没什么可清。 -->
     <div class="actions">
-      <button class="clear" type="button" :disabled="!shapes.length" @click="emit('clear')">
+      <button
+        class="act export"
+        type="button"
+        :disabled="!result || loading || exporting"
+        :title="result ? '导出并集/交集/重叠度统计 + 设施明细' : '还没有可导出的结果'"
+        @click="emit('export')"
+      >
+        {{ exporting ? '导出中…' : '导出 CSV' }}
+      </button>
+      <button class="act clear" type="button" :disabled="!shapes.length" @click="emit('clear')">
         清空所有面
       </button>
     </div>
@@ -564,14 +577,17 @@ function shapeSub(s) {
   flex: none;
 }
 
-/* ═══ 清空按钮 ═══ */
+/* ═══ 底部动作（导出 / 清空 并排）═══ */
 .actions {
+  display: flex;
+  gap: 8px;
   padding: 8px 14px 12px;
   border-top: 1px solid #f0f4f8;
   flex: none;
 }
-.clear {
-  width: 100%;
+.act {
+  flex: 1;
+  min-width: 0;
   height: 30px;
   border-radius: 7px;
   border: 1px solid #dde5ec;
@@ -580,15 +596,33 @@ function shapeSub(s) {
   font-size: 12px;
   font-family: inherit;
   cursor: pointer;
+  white-space: nowrap;
   transition: border-color 0.15s, background 0.15s, color 0.15s;
 }
-.clear:hover:not(:disabled) {
+/* 导出是主操作：实心红，和其它面板里的「导出 CSV」视觉一致 */
+.act.export {
+  border-color: #d93025;
+  background: #d93025;
+  color: #fff;
+  font-weight: 700;
+}
+.act.export:hover:not(:disabled) {
+  background: #c02a20;
+  border-color: #c02a20;
+}
+.act.clear:hover:not(:disabled) {
   border-color: #d93025;
   color: #d93025;
   background: #fdf6f5;
 }
-.clear:disabled {
+.act:disabled {
   opacity: 0.45;
   cursor: not-allowed;
+}
+/* 置灰时别保留实心红，否则看不出是禁用的 */
+.act.export:disabled {
+  background: #f3d5d3;
+  border-color: #f3d5d3;
+  color: #fff;
 }
 </style>

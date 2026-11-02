@@ -23,7 +23,7 @@ import {
 } from './stores/analysis.js';
 import { useBufferAnalysis } from './composables/useBufferAnalysis.js'
 import { splitPercent } from './utils/percent.js';
-import { computed, shallowRef } from 'vue';
+import { computed, ref, shallowRef } from 'vue';
 import { fromLonLat } from 'ol/proj.js';
 import { LAYER } from './map/layers.js';
 import { baseMapLabel } from './map/basemaps.js';
@@ -201,63 +201,233 @@ function stamp() {
   )
 }
 
+// ★ 两个导出（可达性 / 叠加）共用这三个小工具：
+//   同样的转义、同样的 BOM、同样的下载动作，抄两遍迟早会改歪一处。
+
+/** CSV 单元格转义：含逗号、引号、换行时整体加引号，内部引号翻倍 */
+const csvEsc = (v) => {
+  const s = v === null || v === undefined ? '' : String(v)
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
+}
+
+const csvLine = (arr) => arr.map(csvEsc).join(',')
+
 /**
- * 导出当前分析结果。
- *
- * ★ 内容分三段：参数 / 分类汇总 / 设施清单。
- *   设施清单只有接口返回的那几十条（/nearby 上限 50、/within 上限 200），
- *   所以文件名和表头都写清"最近的 N 条"，不假装是全量。
+ * 生成并下载 CSV 文件。
  * ★ 开头加 \ufeff 是给 WPS/Excel 认 UTF-8 用的，否则中文乱码。
+ * ★ 行分隔用 \r\n：Excel 对它兼容性最好（只用 \n 在老版本里会挤成一行）。
  */
-const onExportCsv = () => {
-  const r = analysis.displayResult
-  if (!r) return
-
-  const esc = (v) => {
-    const s = v === null || v === undefined ? '' : String(v)
-    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s
-  }
-  const line = (arr) => arr.map(esc).join(',')
-
-  const rows = []
-  rows.push(line(['可达性分析结果', stamp()]))
-  if (r.mode === 'area') {
-    rows.push(line(['分析范围', '手绘/框选多边形', '面积(km²)', r.areaKm2?.toFixed(2) ?? '']))
-  } else {
-    rows.push(line(['分析中心', r.centerName ?? '已选点', '半径(m)', r.radiusM ?? analysis.radius]))
-  }
-  rows.push(line(['设施总数', r.count]))
-  rows.push('')
-
-  rows.push(line(['类别', '数量', '占比']))
-  // ★ 占比同样用最大余数法（这里保留一位小数），保证 CSV 里加起来是 100.0
-  const catEntries = Object.entries(r.byCategory)
-  const pcts = splitPercent(catEntries.map(([, n]) => n), 1)
-  catEntries.forEach(([key, n], i) => {
-    const label = CATEGORIES.find((c) => c.key === key)?.label ?? key
-    rows.push(line([label, n, `${pcts[i].toFixed(1)}%`]))
-  })
-  rows.push('')
-
-  rows.push(line(['序号', '名称', '类别', '距离(m)']))
-  r.items.forEach((it, i) => {
-    const label = CATEGORIES.find((c) => c.key === it.category)?.label ?? it.category
-    rows.push(line([i + 1, it.name, label, Math.round(it.distanceM)]))
-  })
-  rows.push('')
-  rows.push(line([`注：设施清单为接口返回的前 ${r.items.length} 条，非全量`]))
-
+function downloadCsv(rows, filename) {
   const blob = new Blob(['\ufeff' + rows.join('\r\n')], {
     type: 'text/csv;charset=utf-8',
   })
   const url = URL.createObjectURL(blob)
   const a = document.createElement('a')
   a.href = url
-  a.download = `可达性分析_${stamp()}.csv`
+  a.download = filename
   document.body.appendChild(a)
   a.click()
   a.remove()
   URL.revokeObjectURL(url)
+}
+
+/**
+ * 导出当前分析结果。
+ *
+ * ★ 内容分三段：参数 / 分类汇总 / 设施清单。
+ *   设施清单只有接口返回的那几十条（/nearby 上限 50、/within 上限 200），
+ *   所以文件名和表头都写清"最近的 N 条"，不假装是全量。
+ */
+const onExportCsv = () => {
+  const r = analysis.displayResult
+  if (!r) return
+
+  const rows = []
+  rows.push(csvLine(['可达性分析结果', stamp()]))
+  if (r.mode === 'area') {
+    rows.push(csvLine(['分析范围', '手绘/框选多边形', '面积(km²)', r.areaKm2?.toFixed(2) ?? '']))
+  } else {
+    rows.push(csvLine(['分析中心', r.centerName ?? '已选点', '半径(m)', r.radiusM ?? analysis.radius]))
+  }
+  rows.push(csvLine(['设施总数', r.count]))
+  rows.push('')
+
+  rows.push(csvLine(['类别', '数量', '占比']))
+  // ★ 占比同样用最大余数法（这里保留一位小数），保证 CSV 里加起来是 100.0
+  const catEntries = Object.entries(r.byCategory)
+  const pcts = splitPercent(catEntries.map(([, n]) => n), 1)
+  catEntries.forEach(([key, n], i) => {
+    const label = CATEGORIES.find((c) => c.key === key)?.label ?? key
+    rows.push(csvLine([label, n, `${pcts[i].toFixed(1)}%`]))
+  })
+  rows.push('')
+
+  rows.push(csvLine(['序号', '名称', '类别', '距离(m)']))
+  r.items.forEach((it, i) => {
+    const label = CATEGORIES.find((c) => c.key === it.category)?.label ?? it.category
+    rows.push(csvLine([i + 1, it.name, label, Math.round(it.distanceM)]))
+  })
+  rows.push('')
+  rows.push(csvLine([`注：设施清单为接口返回的前 ${r.items.length} 条，非全量`]))
+
+  downloadCsv(rows, `可达性分析_${stamp()}.csv`)
+}
+
+/** 叠加导出进行中：要额外拉一次明细，按钮得有个"正在取数据"的态 */
+const overlayExporting = ref(false)
+
+/**
+ * 导出叠加分析结果。
+ *
+ * ★ 结构和可达性那份不同：
+ *   那边是「一个范围 + 一份设施清单」，这边是「N 个面 + 三张汇总表 + 一份设施明细」。
+ *
+ * ★ 明细要单独再请求一次（withItems: true）：
+ *   面板平时只拉统计和几何，几百条 POI 不该在每次拖滑杆时都传一遍。
+ *   导出时多一次往返，换来面板的流畅 —— 这个交换值得。
+ *
+ * ★ 所有数字**直接用后端返回的**，前端一个都不重算：
+ *   ol/sphere 是球面公式、PostGIS geography 是椭球公式，两边面积差 0.3%，
+ *   同一份 CSV 里出现两套数会让人怀疑数据出处。
+ *   （这也是为什么"每个面的面积"取自返回的 shapes[]，而不是 store 里那个估算值）
+ *
+ * ★ 面积**不补 toFixed(2)**，保留后端的三位小数 —— 不是偷懒：
+ *   面板底部那句「各重叠度面积相加 = 并集」是个恒等式，靠的是全精度。
+ *   四舍五入到两位就会破：实测 2.056 + 0.968 = 3.024，
+ *   显示成 2.06 + 0.97 = 3.03，而并集是 3.02 —— 看起来像 bug。
+ *   导出给人做数据处理，精度比"和面板长得一样"重要。
+ */
+const onExportOverlayCsv = async () => {
+  const shown = analysis.overlayResult
+  if (!shown || overlayExporting.value) return
+
+  // ── 先补拉一次带明细的完整结果 ──────────────────────────
+  // ★ 拉成功就整份用新的（统计 + 明细都来自同一个响应，不会自相矛盾）；
+  //   拉失败就退回屏幕上那份统计，并在 CSV 末尾写明"明细获取失败"，不假装有。
+  overlayExporting.value = true
+  let data = shown
+  let items = []
+  let itemsTotal = 0
+  let itemsFailed = false
+  try {
+    const res = await fetch('/api/poi/overlay', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        shapes: analysis.overlayShapes,
+        withItems: true,
+      }),
+    })
+    if (res.ok) {
+      data = await res.json()
+      items = data.items ?? []
+      itemsTotal = data.itemsTotal ?? 0
+    } else {
+      itemsFailed = true
+    }
+  } catch (e) {
+    itemsFailed = true
+    console.warn('[导出] 拉取设施明细失败', e)
+  } finally {
+    overlayExporting.value = false
+  }
+
+  const n = data.shapeCount ?? analysis.shapes.length
+  const rows = []
+
+  rows.push(csvLine(['叠加分析结果', stamp()]))
+  rows.push(csvLine(['面数', n]))
+  rows.push('')
+
+  // ① 参与叠加的面
+  // ★ 用 id 去 shapes[] 里配对：那块是后端算的权威值，store 里的是前端估算
+  const statById = new Map((data.shapes ?? []).map((s) => [s.id, s]))
+  rows.push(csvLine(['【参与叠加的面】']))
+  rows.push(csvLine(['序号', '区域', '类型', '半径(m)', '面积(km²)', '设施数']))
+  analysis.shapes.forEach((s, i) => {
+    const st = statById.get(s.id) ?? {}
+    rows.push(csvLine([
+      i + 1,
+      s.label,
+      s.kind === 'circle' ? '缓冲圈' : '手绘面',
+      s.kind === 'circle' ? Math.round(s.radius ?? 0) : '',
+      st.areaKm2 ?? s.areaKm2?.toFixed(2) ?? '',
+      st.poi ?? '',
+    ]))
+  })
+  rows.push('')
+
+  // ② 并集
+  const u = data.union ?? {}
+  rows.push(csvLine(['【并集 · 全部面覆盖的范围】']))
+  rows.push(csvLine(['面积(km²)', u.areaKm2 ?? '']))
+  rows.push(csvLine(['设施总数', u.poi ?? '']))
+  rows.push('')
+
+  // ③ 并集按类别（四类常驻，0 也写出来，和面板一致）
+  rows.push(csvLine(['【并集按类别】']))
+  rows.push(csvLine(['类别', '数量', '占比']))
+  const catEntries = CATEGORIES.map((c) => [c.key, Number(u.byCategory?.[c.key] ?? 0)])
+  const pcts = splitPercent(catEntries.map(([, cnt]) => cnt), 1)
+  catEntries.forEach(([key, cnt], i) => {
+    const label = CATEGORIES.find((c) => c.key === key)?.label ?? key
+    rows.push(csvLine([label, cnt, `${pcts[i].toFixed(1)}%`]))
+  })
+  rows.push('')
+
+  // ④ 交集（全部 n 个面共同覆盖）
+  const it = data.intersect ?? {}
+  rows.push(csvLine([`【交集 · 同时被 ${n} 个面覆盖】`]))
+  if (it.empty) {
+    // 明确写一句，而不是留空 —— 空单元格会被读成"没算出来"
+    rows.push(csvLine(['结论', '无共同重叠区']))
+  } else {
+    rows.push(csvLine(['面积(km²)', it.areaKm2 ?? '']))
+    rows.push(csvLine(['设施数', it.poi ?? '']))
+  }
+  rows.push('')
+
+  // ⑤ 按重叠度
+  rows.push(csvLine(['【按重叠度】']))
+  rows.push(csvLine(['重叠度', '面积(km²)', '设施数']))
+  for (const d of data.byDegree ?? []) {
+    rows.push(csvLine([`${d.deg} 重`, d.areaKm2, d.poi]))
+  }
+  rows.push('')
+
+  // ⑥ 设施明细
+  // ★ 「重叠度」这一列是这份表最有价值的东西：平面细分保证每个设施**恰好**
+  //   落在一个原子面里，所以"被几层覆盖"是唯一确定的值，不会有歧义。
+  rows.push(csvLine(['【设施明细】']))
+  rows.push(csvLine(['序号', '名称', '类别', '经度', '纬度', '重叠度', '覆盖区域']))
+
+  const labelById = new Map(analysis.shapes.map((s) => [s.id, s.label]))
+  if (!items.length) {
+    rows.push(csvLine([itemsFailed ? '（明细获取失败，仅导出统计）' : '（范围内没有设施）']))
+  } else {
+    items.forEach((x, i) => {
+      const members = (x.members ?? []).map((id) => labelById.get(id) ?? id).join('·')
+      rows.push(csvLine([
+        i + 1,
+        x.name || '未命名',
+        CATEGORIES.find((c) => c.key === x.category)?.label ?? x.category ?? '',
+        x.lon,
+        x.lat,
+        `${x.deg} 重`,
+        members,
+      ]))
+    })
+  }
+  rows.push('')
+
+  // ⑦ 脚注
+  rows.push(csvLine(['注：重叠区互不重复，各重叠度面积相加等于并集面积']))
+  rows.push(csvLine(['注：「重叠度」指该设施位于被几层服务圈同时覆盖的区域']))
+  if (itemsTotal > items.length) {
+    rows.push(csvLine([`注：设施共 ${itemsTotal} 条，此处仅导出前 ${items.length} 条`]))
+  }
+
+  downloadCsv(rows, `叠加分析_${stamp()}.csv`)
 }
 
 // ── 分析工具面板的数据桥（面板是纯展示组件，状态都在 store）────
@@ -367,10 +537,12 @@ const onOptionPick = (id, key) => {
     :error="analysis.overlayError"
     :max-shapes="MAX_SHAPES"
     :selected="analysis.shapeSelected"
+    :exporting="overlayExporting"
     @remove="onShapeRemove"
     @select="onShapeSelect"
     @clear="onShapeClear"
     @retry="onOverlayRetry"
+    @export="onExportOverlayCsv"
   />
   <AnalysisResult
     v-else-if="analysis.active"

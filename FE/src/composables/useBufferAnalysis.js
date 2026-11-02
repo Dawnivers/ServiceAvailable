@@ -102,20 +102,12 @@ export function useBufferAnalysis() {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            // ★ 只传几何来源，不传区号颜色那些展示字段：
-            //   后端算的是几何，展示用的字母颜色由前端 store 管。
-            shapes: analysis.shapes.map((s) =>
-              s.kind === 'circle'
-                ? {
-                    id: s.id,
-                    name: s.label,
-                    kind: 'circle',
-                    lon: s.lon,
-                    lat: s.lat,
-                    radius: s.radius,
-                  }
-                : { id: s.id, name: s.label, kind: 'area', wkt: s.wkt },
-            ),
+            // ★ 载荷形状由 store 的 overlayShapes getter 统一给出，
+            //   和导出 CSV 走同一份 —— 两边各拼一份漏字段就会各错各的。
+            shapes: analysis.overlayShapes,
+            // ★ 面板只要数字和几何。明细（几百条 POI）等点「导出 CSV」时再拉，
+            //   否则每次拖半径滑杆都要多传几百 KB。
+            withItems: false,
           }),
         };
       } else if (key.startsWith('nearby')) {

@@ -46,6 +46,12 @@ public interface PoiMapper {
      *   SQL 里 cast(? as jsonb) 展开成行 —— 这样面数可变也不用拼 SQL。
      * ★ 返回 String 而不是 JsonNode：MyBatis 没有 JsonNode 的 TypeHandler，
      *   契约转换（readTree）统一放在 service 里做，和 AreaService.getAreas 同一手法。
+     *
+     * @param shapesJson 面数组的 JSON
+     * @param withItems  是否附带设施明细 —— 只有导出 CSV 时才要（见 OverlayReq）
+     * @param itemLimit  明细条数上限，防"画了六个大面"时一次返回上万条
      */
-    String overlay(@Param("shapesJson") String shapesJson);
+    String overlay(@Param("shapesJson") String shapesJson,
+                   @Param("withItems") boolean withItems,
+                   @Param("itemLimit") int itemLimit);
 }

@@ -160,14 +160,26 @@ public class PoiService {
     private static final double MAX_RADIUS_M = 5000.0;
 
     /**
+     * 导出时设施明细的条数上限。
+     *
+     * ★ 5000 是个折中：城市核心区画两个 2 km 的圈，并集里也就一两千个设施，
+     *   够覆盖真实使用；再往上响应会到几 MB，浏览器解析比查库还慢。
+     * ★ 超了不是错，接口会一并返回 itemsTotal，前端在 CSV 末尾写一句「共 N 条，仅导出前 M 条」。
+     */
+    private static final int MAX_ITEM_LIMIT = 5000;
+
+    /**
      * 多面叠加分析。
      *
      * ★ 校验放在 service、几何运算放在 SQL，和 within 同一分工。
      * ★ 但**没有**做 within 那样的 ST_IsValid 体检：
      *   叠加是「用户边画边加」的多面场景，一个手抖的自相交面不该让整批 6 个面全 400。
      *   SQL 里用 CASE WHEN ST_IsValid THEN geom ELSE ST_MakeValid(geom) 就地修正。
+     *
+     * @param withItems 是否附带设施明细（导出 CSV 才要）。面板取数时传 false，
+     *                  避免每次拖滑杆都把几百条 POI 一起拉回来。
      */
-    public JsonNode overlay(List<OverlayReq.Shape> shapes) {
+    public JsonNode overlay(List<OverlayReq.Shape> shapes, boolean withItems) {
         // ① 数量
         if (shapes == null || shapes.size() < MIN_SHAPES) {
             throw new ResponseStatusException(HttpStatus.BAD_REQUEST,
@@ -227,7 +239,7 @@ public class PoiService {
                     "cannot encode shapes", e);
         }
 
-        String raw = poiMapper.overlay(json);
+        String raw = poiMapper.overlay(json, withItems, MAX_ITEM_LIMIT);
         if (raw == null) {
             throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR,
                     "overlay query returned nothing");

@@ -91,7 +91,8 @@ public class PoiController {
      *   { "shapes": [
      *       { "id":"s1", "name":"A", "kind":"area",   "wkt":"POLYGON((...))" },
      *       { "id":"s2", "name":"B", "kind":"circle", "lon":114.3, "lat":30.55, "radius":800 }
-     *   ] }
+     *     ],
+     *     "withItems": false }
      * </pre>
      *
      * ★ 为什么这里换成 POST + JSON body，而 /within 还是 GET：
@@ -103,9 +104,17 @@ public class PoiController {
      * ★ 返回 JsonNode 而不是 DTO：结果里有「面列表」「重叠度列表」「GeoJSON 几何」
      *   三块结构完全不同的数据，用嵌套 record 反而比 JSON 更啰嗦。
      *   SQL 里 json_build_object 一次拼好，这里透传（与 /api/areas 同一手法）。
+     *
+     * ★ withItems：面板取数传 false（只要数字和几何）；导出 CSV 时传 true，
+     *   响应里会多出 items[]（每条带 gid/名称/类别/经纬度/deg/members）。
+     *   同一个接口不同载荷，比再开一个只差两个字段的端点好维护。
      */
     @PostMapping("/overlay")
     public JsonNode overlay(@RequestBody(required = false) OverlayReq req) {
-        return poiService.overlay(req == null ? null : req.shapes());
+        if (req == null) {
+            // 空 body 交给 service 报「至少 2 个面」，别在这里 NPE
+            return poiService.overlay(null, false);
+        }
+        return poiService.overlay(req.shapes(), Boolean.TRUE.equals(req.withItems()));
     }
 }

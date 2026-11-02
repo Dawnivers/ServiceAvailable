@@ -386,7 +386,43 @@ SELECT json_build_object(
             ) ORDER BY a.deg, ST_Area(a.g::geography) DESC), '[]'::json)
         )
         FROM atom a
-    )
+    ),
+
+    ---------------------------------------------------------------- 设施明细（只在导出时算）
+    -- ★ 平面细分的一大好处：原子面互不重叠，所以每个 POI 恰好落在一个原子里，
+    --   「这个设施被几层覆盖」是唯一确定的值（deg），不存在算两遍的问题。
+    -- ★ 默认不算：面板只显示数字，每次拖滑杆都拉几百条 POI 会让响应涨十几倍。
+    --   前端只在点「导出 CSV」时传 withItems=true。
+    -- ★ withItems 必须 cast：CASE 的条件位如果只给占位符，
+    --   PG 推不出参数类型会报 "could not determine data type"。
+    'items', CASE WHEN cast(#{withItems} as boolean) THEN (
+        SELECT coalesce(json_agg(json_build_object(
+                   'gid',      x.gid,
+                   'name',     x.name,
+                   'category', x.category,
+                   'lon',      x.lon,
+                   'lat',      x.lat,
+                   'deg',      x.deg,
+                   'members',  x.members
+               )), '[]'::json)
+        FROM (
+            SELECT p.gid, p.name, p.category,
+                   ST_X(p.geom) AS lon,
+                   ST_Y(p.geom) AS lat,
+                   a.deg,
+                   to_json(a.members) AS members
+            FROM poi p
+            JOIN atom a ON ST_Contains(a.g, p.geom)
+            -- 核心区（deg 大）排前面：万一被 limit 截断，重要的不会丢
+            ORDER BY a.deg DESC, p.gid
+            LIMIT #{itemLimit}
+        ) x
+    ) ELSE '[]'::json END,
+
+    -- 明细总数：和返回的 items 长度一比，前端就知道有没有被截断
+    'itemsTotal', CASE WHEN cast(#{withItems} as boolean) THEN (
+        SELECT count(*) FROM poi p JOIN atom a ON ST_Contains(a.g, p.geom)
+    ) ELSE 0 END
 );
 </select>
 

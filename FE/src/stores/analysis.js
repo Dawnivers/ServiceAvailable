@@ -171,6 +171,27 @@ export const useAnalysisStore = defineStore('analysis', {
         centerName: s.center?.name ?? null,
       };
     },
+
+    /**
+     * 叠加请求的 shapes 数组（已翻成后端要的形状）。
+     *
+     * ★ 放 getter 是为了只有一处真相：面板取数和导出 CSV 用的是**同一个载荷**，
+     *   各拼一份迟早会漏字段（比如导出时忘了带 radius，圆就变成 0 米）。
+     * ★ 只传几何来源，不传颜色/面积那些展示字段 —— 见 /api/poi/overlay 的说明。
+     */
+    overlayShapes: (s) =>
+      s.shapes.map((x) =>
+        x.kind === 'circle'
+          ? {
+              id: x.id,
+              name: x.label,
+              kind: 'circle',
+              lon: x.lon,
+              lat: x.lat,
+              radius: x.radius,
+            }
+          : { id: x.id, name: x.label, kind: 'area', wkt: x.wkt },
+      ),
   },
 
   actions: {

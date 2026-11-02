@@ -17,8 +17,14 @@ import java.util.List;
  *   转成 WKT 多边形只是它在 WGS84 下的近似。而这里把圆心半径交给
  *   ST_Buffer(::geography, r)，得到的是**地面上的正圆**，
  *   和 /api/poi/nearby 用的 ST_DWithin(geom::geography, ...) 完全口径一致。
+ *
+ * @param shapes    2–6 个面
+ * @param withItems 是否附带设施明细。
+ *                  ★ 默认 false：面板只显示数字，不需要那几百条 POI；
+ *                    每次拖滑杆都带上明细会让响应从几 KB 涨到几百 KB。
+ *                    只有「导出 CSV」时才传 true。
  */
-public record OverlayReq(List<Shape> shapes) {
+public record OverlayReq(List<Shape> shapes, Boolean withItems) {
 
     /**
      * @param id     前端生成的稳定标识（"s1"/"s2"...），回传时原样带回，用于对应
