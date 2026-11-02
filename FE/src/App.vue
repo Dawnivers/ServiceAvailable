@@ -20,6 +20,7 @@ import {
   CATEGORIES,
   RADIUS,
   MAX_SHAPES,
+  DEGREE_COLORS,
 } from './stores/analysis.js';
 import { useBufferAnalysis } from './composables/useBufferAnalysis.js'
 import { splitPercent } from './utils/percent.js';
@@ -301,36 +302,26 @@ const onExportOverlayCsv = async () => {
   const shown = analysis.overlayResult
   if (!shown || overlayExporting.value) return
 
-  // ── 先补拉一次带明细的完整结果 ──────────────────────────
-  // ★ 拉成功就整份用新的（统计 + 明细都来自同一个响应，不会自相矛盾）；
-  //   拉失败就退回屏幕上那份统计，并在 CSV 末尾写明"明细获取失败"，不假装有。
+  // ── 明细：已经加载过就直接用，没加载过才补一次请求 ──────────
+  // ★ store 里一旦 overlayResult 被替换就会清空 overlayItems，
+  //   所以"非空"本身就意味着"是当前这组面的"。
   overlayExporting.value = true
   let data = shown
-  let items = []
-  let itemsTotal = 0
+  let items = analysis.overlayItems
+  let itemsTotal = analysis.overlayItemsTotal
   let itemsFailed = false
-  try {
-    const res = await fetch('/api/poi/overlay', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        shapes: analysis.overlayShapes,
-        withItems: true,
-      }),
-    })
-    if (res.ok) {
-      data = await res.json()
-      items = data.items ?? []
-      itemsTotal = data.itemsTotal ?? 0
-    } else {
+  if (!items.length) {
+    try {
+      const got = await fetchOverlayItems()
+      data = got.data
+      items = got.items
+      itemsTotal = got.total
+    } catch (e) {
       itemsFailed = true
+      console.warn('[导出] 拉取设施明细失败', e)
     }
-  } catch (e) {
-    itemsFailed = true
-    console.warn('[导出] 拉取设施明细失败', e)
-  } finally {
-    overlayExporting.value = false
   }
+  overlayExporting.value = false
 
   const n = data.shapeCount ?? analysis.shapes.length
   const rows = []
@@ -450,6 +441,41 @@ const onOverlayRetry = () => {
 }
 
 /**
+ * 拉一次带明细的叠加结果（面板展开明细 / 导出 CSV 共用）。
+ *
+ * ★ 主接口默认 withItems=false（4KB vs 26KB），所以这是**按需**的额外一次请求。
+ * ★ 失败不抛到界面上：面板显示「加载失败」，导出退回只导统计。
+ */
+async function fetchOverlayItems() {
+  const res = await fetch('/api/poi/overlay', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      shapes: analysis.overlayShapes,
+      withItems: true,
+    }),
+  })
+  if (!res.ok) throw new Error(`HTTP ${res.status}`)
+  const data = await res.json()
+  return { data, items: data.items ?? [], total: data.itemsTotal ?? 0 }
+}
+
+/** 面板里展开「设施明细」时触发 */
+const onLoadOverlayItems = async () => {
+  if (analysis.overlayItemsLoading) return
+  analysis.setOverlayItemsLoading(true)
+  try {
+    const { items, total } = await fetchOverlayItems()
+    analysis.setOverlayItems(items, total)
+  } catch (e) {
+    analysis.setOverlayItemsError('明细加载失败')
+    console.warn('[叠加] 加载设施明细失败', e)
+  } finally {
+    analysis.setOverlayItemsLoading(false)
+  }
+}
+
+/**
  * 当前「还能用半径滑杆调」的那个面的字母，给工具栏显示「调 A」。
  * ★ activeShapeId 是 store 里唯一的真相：画完一个圆它成为 active，
  *   画下一笔（圆或多边形）就顶掉，滑杆随即失去作用。
@@ -458,6 +484,28 @@ const activeShapeLabel = computed(() => {
   const s = analysis.shapes.find((x) => x.id === analysis.activeShapeId)
   return s ? s.label : null
 })
+
+/**
+ * 图例该显示哪一套。
+ * ★ 叠加模式优先：此时地图上真正需要解码的是"这块颜色深到几重"，
+ *   而不是 POI 的四个类别色（分析模式下 POI 层虽然亮着，但它是背景）。
+ */
+const legendMode = computed(() => {
+  if (analysis.active && analysis.overlay) return 'degree'
+  return store.visible.heat ? 'heat' : 'poi'
+})
+
+/**
+ * 重叠度的档位，直接由接口结果的 byDegree 映射。
+ * ★ 只列实际出现的档：3 个面不一定有三重重叠区，
+ *   凭空补一档会让图例和地图对不上。
+ */
+const overlayDegrees = computed(() =>
+  (analysis.overlayResult?.byDegree ?? []).map((d) => ({
+    deg: d.deg,
+    color: DEGREE_COLORS[Math.min(d.deg, DEGREE_COLORS.length) - 1],
+  })),
+)
 
 const layers = computed(() =>
   LAYER.map(d => ({
@@ -538,11 +586,16 @@ const onOptionPick = (id, key) => {
     :max-shapes="MAX_SHAPES"
     :selected="analysis.shapeSelected"
     :exporting="overlayExporting"
+    :items="analysis.overlayItems"
+    :items-total="analysis.overlayItemsTotal"
+    :items-loading="analysis.overlayItemsLoading"
+    :items-error="analysis.overlayItemsError"
     @remove="onShapeRemove"
     @select="onShapeSelect"
     @clear="onShapeClear"
     @retry="onOverlayRetry"
     @export="onExportOverlayCsv"
+    @load-items="onLoadOverlayItems"
   />
   <AnalysisResult
     v-else-if="analysis.active"
@@ -579,12 +632,13 @@ const onOptionPick = (id, key) => {
   />
 
   <!-- 左下：图例。
-       ★ 模式跟着热力图开关走，不能两个图例并排 ——
-         POI 图例是「类别→颜色」，热力图例是「数值→颜色」，
-         同时出现会让人以为"红=医院"和"红=密度高"是一回事。 -->
+       ★ 三种模式互斥，不能并排 —— POI 图例是「类别→颜色」，
+         热力图例是「数值→颜色」，重叠度图例是「层数→颜色」，
+         同时出现会让人以为"红=医院"和"红=三层重叠"是一回事。 -->
   <MapLegend
-    :mode="store.visible.heat ? 'heat' : 'poi'"
+    :mode="legendMode"
     :heat-key="store.heatCategory"
+    :degrees="overlayDegrees"
   />
 
   <!-- 底部中：浏览模式是数据统计条，分析模式换成「请求 SQL」说明条 -->

@@ -1,17 +1,23 @@
 <script setup>
 /**
  * ════════════════════════════════════════════════════════════
- * MapLegend —— 左下角图例（两种模式）
+ * MapLegend —— 左下角图例（三种模式）
  *
- *   mode = 'poi'   类别色点：学校蓝 / 医院红 / 商场橙 / 公园绿
- *   mode = 'heat'  数值色带：无覆盖 / 0.2–1 倍 / ... / ≥25 倍
+ *   mode = 'poi'     类别色点：学校蓝 / 医院红 / 商场橙 / 公园绿
+ *   mode = 'heat'    数值色带：无覆盖 / 0.2–1 倍 / ... / ≥25 倍
+ *   mode = 'degree'  重叠度色阶：1 重 / 2 重 / 3 重 …（叠加分析）
  *
  * ★ 为什么必须切换而不是并排显示：
- *   POI 图例是「类别 → 颜色」，热力图图例是「数值 → 颜色」。
- *   两个同时出现，用户会以为「红 = 医院」和「红 = 密度高」是一回事。
+ *   POI 图例是「类别 → 颜色」，热力图图例是「数值 → 颜色」，
+ *   重叠度图例是「层数 → 颜色」。三个同时出现，用户会以为
+ *   「红 = 医院」和「红 = 密度高」和「红 = 三层重叠」是一回事。
  *
  * ★ 热力色带不在本文件里写死，全部来自 map/heatmap.js，
  *   而 heatmap.js 又与 BE/styles/grid_*.sld 逐字对齐（有校验脚本）。
+ *
+ * ★ 重叠度色阶也不写死：行由调用方从接口结果的 byDegree 传进来，
+ *   颜色取 stores/analysis.js 的 DEGREE_COLORS（和地图、面板同一份），
+ *   这样"图例上有几档"永远等于"图上实际出现几档"。
  *
  * 纯展示：不 import store / 地图，只认 props。
  * POI 的颜色与 layers.js 的 chips、GeoServer 样式、PoiDetailCard 的标签一致，
@@ -33,42 +39,59 @@ const POI_ITEMS = [
 const props = defineProps({
   title: { type: String, default: '图例' },
   subtitle: { type: String, default: 'WMS 样式' },
-  /** 'poi' = 类别色点；'heat' = 数值色带 */
+  /** 'poi' = 类别色点；'heat' = 数值色带；'degree' = 重叠度色阶 */
   mode: { type: String, default: 'poi' },
   /** 热力图类别 key（heatmap.js 的 HEAT_CATEGORIES[].key） */
   heatKey: { type: String, default: 'total' },
+  /**
+   * 叠加模式的重叠度行：`[{ deg, color }]`，由调用方从 byDegree 映射而来。
+   * ★ 只传实际存在的档：3 个面不一定有三重重叠，凭空补一档会误导。
+   */
+  degrees: { type: Array, default: () => [] },
 })
 
 const isHeat = computed(() => props.mode === 'heat')
+const isDegree = computed(() => props.mode === 'degree')
 
-const titleText = computed(() => (isHeat.value ? '可达性热力图' : props.title))
-const subText = computed(() =>
-  isHeat.value ? heatLegendSubtitle(props.heatKey) : props.subtitle,
-)
+const titleText = computed(() => {
+  if (isDegree.value) return '重叠度'
+  return isHeat.value ? '可达性热力图' : props.title
+})
+const subText = computed(() => {
+  if (isDegree.value) return '越深覆盖越多'
+  return isHeat.value ? heatLegendSubtitle(props.heatKey) : props.subtitle
+})
 
 /**
  * 图例条目。
  * ★ 热力模式下 color 可能是 null —— 那是「无覆盖」档（67.3% 的格子），
  *   必须用一个空心/虚线块表达，否则用户会以为地图没加载完。
  */
-const items = computed(() =>
-  isHeat.value
+const items = computed(() => {
+  if (isDegree.value) {
+    return props.degrees.map((d) => ({
+      key: 'deg' + d.deg,
+      label: `${d.deg} 重`,
+      color: d.color,
+    }))
+  }
+  return isHeat.value
     ? heatLegend(props.heatKey).map((b, i) => ({
         key: 'band' + i,
         label: b.label,
         color: b.color,
       }))
-    : POI_ITEMS,
-)
+    : POI_ITEMS
+})
 </script>
 
 <template>
-  <div class="legend" :class="{ 'is-heat': isHeat }">
+  <div class="legend" :class="{ 'is-heat': isHeat, 'is-degree': isDegree }">
     <div class="head">
       <span class="title">{{ titleText }}</span>
       <span class="sub">{{ subText }}</span>
     </div>
-    <ul class="list">
+    <ul v-if="items.length" class="list">
       <li v-for="it in items" :key="it.key" class="item">
         <span v-if="it.color" class="dot" :style="{ background: it.color }" />
         <!-- 无覆盖档：虚线空心块 -->
@@ -76,6 +99,8 @@ const items = computed(() =>
         <span class="label">{{ it.label }}</span>
       </li>
     </ul>
+    <!-- 叠加模式下还没算出结果（不足 2 个面）：给出下一步，而不是留一个空框 -->
+    <div v-else class="hint">叠满 2 个面后显示</div>
   </div>
 </template>
 
@@ -99,6 +124,10 @@ const items = computed(() =>
 /* 热力模式下条目多两条，略加宽一点，避免「10–25 倍」被挤断 */
 .legend.is-heat {
   width: 160px;
+}
+/* 重叠度：档数不定（最多 6），条目标签最长「6 重」，常规宽度够 */
+.legend.is-degree {
+  width: 148px;
 }
 
 .head {
@@ -144,6 +173,12 @@ const items = computed(() =>
   height: 10px;
   border-radius: 2px;
 }
+/* 重叠度也是色阶（层数递增），跟热力一样用方块 */
+.legend.is-degree .dot {
+  width: 14px;
+  height: 10px;
+  border-radius: 2px;
+}
 /* 无覆盖：虚线空心 */
 .dot.is-empty {
   background: transparent;
@@ -156,5 +191,13 @@ const items = computed(() =>
 /* 热力模式的数值文字用等宽数字，扫一眼更整齐 */
 .legend.is-heat .label {
   font-variant-numeric: tabular-nums;
+}
+
+/* 叠加模式下还没有结果时的引导文案 */
+.hint {
+  padding: 2px 0 4px;
+  font-size: 11.5px;
+  color: #a8bccd;
+  line-height: 1.5;
 }
 </style>

@@ -120,6 +120,16 @@ export const useAnalysisStore = defineStore('analysis', {
     overlayLoading: false,
     overlayError: null,
     overlayMs: null,
+
+    // ── 设施明细（面板里展开时才拉）──────────────────────────
+    // ★ 和 overlayResult 分开存：主接口默认不带明细（withItems=false），
+    //   这几项只由「展开明细」/「导出 CSV」两个动作填充。
+    // ★ 一旦 overlayResult 被替换（面变了、半径变了），明细立即作废 ——
+    //   否则会出现"列表还是旧的 165 条，但统计已经变成新的一组面"。
+    overlayItems: [],
+    overlayItemsTotal: 0,
+    overlayItemsLoading: false,
+    overlayItemsError: null,
   }),
 
   getters: {
@@ -359,7 +369,7 @@ export const useAnalysisStore = defineStore('analysis', {
       this.setOverlay(!this.overlay);
     },
 
-    /** 清掉叠加相关的一切（面本身 + 结果 + 选中），不动 overlay 开关 */
+    /** 清掉叠加相关的一切（面本身 + 结果 + 明细 + 选中），不动 overlay 开关 */
     resetOverlay() {
       this.shapes = [];
       this.shapeSeq = 0;
@@ -367,6 +377,7 @@ export const useAnalysisStore = defineStore('analysis', {
       this.activeShapeId = null;
       this.overlayResult = null;
       this.overlayError = null;
+      this.clearOverlayItems();
       this.overlayLoading = false;
       this.overlayMs = null;
     },
@@ -401,6 +412,7 @@ export const useAnalysisStore = defineStore('analysis', {
       // 面变了，上一轮统计作废（不要显示一份对不上的结果）
       this.overlayResult = null;
       this.overlayError = null;
+      this.clearOverlayItems();
 
       // ★ 刚画完的圆成为「可调半径」的那一个；画多边形则把上一个圆顶掉
       this.activeShapeId = shape.kind === 'circle' ? shape.id : null;
@@ -425,6 +437,7 @@ export const useAnalysisStore = defineStore('analysis', {
       if (this.activeShapeId === id) this.activeShapeId = null;
       this.overlayResult = null;
       this.overlayError = null;
+      this.clearOverlayItems();
     },
 
     /**
@@ -442,6 +455,10 @@ export const useAnalysisStore = defineStore('analysis', {
       if (!s || s.kind !== 'circle') return;
       s.radius = radius;
       s.areaKm2 = areaKm2;
+      // 半径变了，范围内的设施也就变了 —— 明细必须一起作废。
+      // （主统计这里故意不清、免得拖滑杆时面板闪；明细没有这个问题，
+      //   它只在展开时才按需加载。）
+      this.clearOverlayItems();
     },
 
     clearShapes() {
@@ -452,6 +469,7 @@ export const useAnalysisStore = defineStore('analysis', {
       this.overlayResult = null;
       this.overlayError = null;
       this.overlayMs = null;
+      this.clearOverlayItems();
     },
 
     /** 面板里点中一个面：地图上高亮并缩放过去；再点一次取消 */
@@ -467,6 +485,11 @@ export const useAnalysisStore = defineStore('analysis', {
       this.overlayResult = result;
       this.overlayError = null;
       this.overlayMs = ms;
+
+      // ★ 结果一换，明细立刻作废。
+      //   否则会出现「列表明明还是旧的 165 条，统计却已经换了一组面」——
+      //   两块钱信息互相对不上，比不显示更糟。
+      this.clearOverlayItems();
     },
 
     setOverlayLoading(v) {
@@ -476,6 +499,7 @@ export const useAnalysisStore = defineStore('analysis', {
     setOverlayError(msg) {
       this.overlayError = msg;
       this.overlayResult = null;
+      this.clearOverlayItems();
     },
 
     clearOverlayResult() {
@@ -483,6 +507,32 @@ export const useAnalysisStore = defineStore('analysis', {
       this.overlayError = null;
       this.overlayLoading = false;
       this.overlayMs = null;
+      this.clearOverlayItems();
+    },
+
+    // ── 设施明细（面板展开 / 导出时才拉）──────────────────────
+
+    setOverlayItems(items, total = null) {
+      this.overlayItems = Array.isArray(items) ? items : [];
+      this.overlayItemsTotal = total == null ? this.overlayItems.length : total;
+      this.overlayItemsError = null;
+    },
+
+    setOverlayItemsLoading(v) {
+      this.overlayItemsLoading = !!v;
+    },
+
+    setOverlayItemsError(msg) {
+      this.overlayItemsError = msg;
+      this.overlayItems = [];
+      this.overlayItemsTotal = 0;
+    },
+
+    clearOverlayItems() {
+      this.overlayItems = [];
+      this.overlayItemsTotal = 0;
+      this.overlayItemsLoading = false;
+      this.overlayItemsError = null;
     },
   },
 });

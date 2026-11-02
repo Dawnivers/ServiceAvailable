@@ -1204,6 +1204,281 @@ function exitAnalysis() {
 
 ---
 
+### 2.4.14 F5：叠加分析（2026-11-02 完成）
+
+> 一句话：**2–6 个面，求并集 / 交集 / 按重叠度分组，按层数给地图上色，结果可导出 CSV（含设施明细）。**
+> 用户提的原始需求只有一句「画下一个图形，之前的不要消失」，做下来发现核心难点在**怎么切面**。
+
+#### ① 三个定死的决策
+
+| 决策 | 选了 | 为什么 |
+|---|---|---|
+| 入口形态 | **独立开关**，不占工具位 | 「画多个」和「用矩形画 / 自由绘制画」是两个维度。塞进 `TOOLS` 会和 rect/freehand 语义打架：选了「叠加」就画不了矩形了 |
+| 核心算法 | **平面细分**（`ST_Node` + `ST_Polygonize`） | 两两求交会重复计数（见 ②） |
+| 统计维度 | **按重叠度分组**，不枚举组合 | 组合数 2ⁿ−1，6 个面 63 种，没人读得过来（见 ③） |
+
+#### ② 为什么不能两两 `ST_Intersection`
+
+3 个面的例子（各块面积）：
+
+| 区域 | 面积 |
+|---|---|
+| 只在 A / B / C | 10 / 8 / 5 |
+| A∩B 但不含 C | 6 |
+| A∩C 但不含 B | 2 |
+| B∩C 但不含 A | 4 |
+| A∩B∩C | **3** |
+
+```
+两两求交：A∩B=9、A∩C=5、B∩C=7 → 加总 21
+真实「至少两重」：6+2+4+3 = 15        ← 虚报 40%
+```
+
+多出来的正好是 `2×3`（三重区被算了 3 次，该算 1 次）。面一多就要写容斥：
+
+```
+4 面：Σ两两 − 2Σ三三 + 3Σ四四
+6 面：31 项，符号交替
+```
+
+**平面细分把这个公式变成了一个 `GROUP BY`。**
+
+#### ③ SQL 七步（`PoiMapper.xml` 的 `overlay`）
+
+| CTE | 输入 | 输出 | 关键函数 |
+|---|---|---|---|
+| `src` | JSON 数组 | 每面一行 | `jsonb_array_elements` + `ST_GeomFromText` / `ST_Buffer(::geography)` |
+| `valid` | n 个面 | 修好、过滤空 | `IsValid` → `MakeValid` → `CollectionExtract(...,3)` |
+| `cfg` | — | 1 行 n | `count(*)` |
+| **`noded`** | n 个面 | **1 个多线** | `Boundary` → `Collect` → `CollectionExtract(...,2)` → `Node` |
+| **`faces`** | 1 个多线 | **K 行（块）** | `Polygonize` → `Dump` |
+| **`tagged`** | K 块 | K 行带 `members[]` | `PointOnSurface` + `Contains` + `ARRAY(...)` |
+| `atom` | K 块 | K′ 行带 `deg` | `cardinality` + 面积 > 1 m² |
+| `whole` / `common` | 全部 / deg=n | 并集面 / 交集面 | `ST_Union` |
+
+**行数变化最反直觉**：`n 行 → 1 行 → K 行`（先合并再炸开）。
+
+三个具体写法上的坑：
+
+```sql
+-- ① ST_PointOnSurface 而不是 ST_Centroid
+--    凹多边形（月牙、L 形）的形心会跑到面外，用它判"这块属于我吗"会误判成不属于，
+--    那块地方就凭空消失了。PointOnSurface 保证点严格在面内。
+WHERE ST_Contains(v.geom, ST_PointOnSurface(f.g))
+
+-- ② 面积门槛扔细缝
+--    两个几乎相切的圆会切出 1–2 m 宽的碎片：图上一根发丝条纹，统计多一行 0.00004 km²
+AND ST_Area(g::geography) > 1
+
+-- ③ 面积一律 ::geography
+--    ST_Area(geom) 单位是「平方度」，武汉 1° ≈ 111 km，数字毫无意义
+round((ST_Area(g::geography) / 1000000)::numeric, 3)
+```
+
+#### ④ 三个只在运行时才暴露的坑
+
+**坑 1：CTE 不能叫 `full`**
+
+```sql
+full AS (...)   -- ❌ 语法错误 在 "full" 或附近
+                --    FULL 是 SQL 保留字（FULL JOIN），Java 编译期发现不了
+common AS (...) -- ✅
+```
+
+**坑 2：`GeometryCollection` 会让 `ST_Node` 直接 500**
+
+```sql
+-- 用户画了个「8」字
+ST_MakeValid(领结面)   →  MULTIPolygon / GEOMETRYCOLLECTION
+ST_Boundary(那个)      →  MULTILINESTRING
+ST_Collect(混合类型)   →  GEOMETRYCOLLECTION        ← ST_Collect 不合并类型！
+ST_Node(GEOMETRYCOLLECTION)
+  → ERROR: lwgeom_collect_endpoints: invalid type GeometryCollection
+```
+
+两处都要抽：
+
+```sql
+-- 修几何时：只留面
+ST_CollectionExtract(ST_MakeValid(g), 3)
+-- 收边界时：压平成多线（1=POINT 2=LINESTRING 3=POLYGON）
+ST_Node(ST_CollectionExtract(ST_Collect(ST_Boundary(geom)), 2))
+```
+
+**坑 3：明细不该跟着每次计算一起返回**
+
+```
+withItems: false  →  4,151 字节 / 486 ms   ← 面板取数
+withItems: true   → 26,624 字节 /  92 ms   ← 导出 CSV
+```
+
+差 6.5 倍。而面板每次拖半径滑杆都会重发一次请求 —— 那几百条 POI 每次都用不上。
+
+**所以做成同一个接口的开关**，而不是再开一个端点：两个端点意味着上面 60 行细分 SQL 要抄两遍，迟早抄漏。
+
+```sql
+'items', CASE WHEN cast(#{withItems} as boolean) THEN (...) ELSE '[]'::json END
+```
+
+> `withItems` 必须 `cast`：`CASE` 的条件位只给占位符时，PG 推不出参数类型会报
+> "could not determine data type"。
+
+#### ⑤ 前端结构
+
+**两个 `VectorSource`，各管各的（别试图共用一个）**
+
+| 图层 | zIndex | 装什么 | 变化方式 | style |
+|---|---|---|---|---|
+| 绘图层 | 100 | 你画的 A/B/C | **增量**增删 | `analysisStyle` |
+| 结果层 | 99 | 后端算的原子面 | **整体替换**（`clear` + `addFeatures`） | `overlayResultStyle` |
+
+结果层必须整体替换：第二次算出的 7 块和上一次的 3 块**没有对应关系**（中间那块被新面又切碎了），无法增量。
+
+**`Feature` 和图层没有引用关系**：
+
+```
+Feature ──addFeature──→ VectorSource ──构造参数──→ VectorLayer
+                          （只存数组 + 发 change 事件）
+```
+
+图层渲染时把 Source 里的 Feature **一个个作为参数**递给 style 函数 —— 「按 deg 上色」就发生在这里（`feature.get('deg')`）。所以 `style` 一直没变过，变的是它每次被调用时读到的值。
+
+**叠加面用 `kind='shape'` 而不是复用 `'circle'` / `'polygon'`**
+
+那两个 kind 会被 `paintCircle` / `removeByKind` 当成「单图形」清掉 —— 叠加模式下一拖半径、一换中心，画好的面就全没了。`'shape'` 自成一路。
+
+**半径滑杆：靠 `activeShapeId` 单向驱动**
+
+```
+画完圆 A  →  activeShapeId = 's1'   （A 画虚线 = 可调）
+画完圆 B  →  activeShapeId = 's2'   （A 转实线 = 锁定）
+画完矩形  →  activeShapeId = null   （B 也锁定）
+```
+
+store 是唯一真相，`drawing.setActiveShape()` 只负责把 `active` 标记刷到要素上。**只让"刚画的那个"可调**，否则拖一下半径几个圆一起变，重叠关系瞬间全乱。
+
+**六条 watcher**（全部走 `watchControl/watchController.js`）
+
+| id | 监听 | 做什么 |
+|---|---|---|
+| `drawing` | active / tool / radius / center / **overlay** | 同步绘制控制器 |
+| `drawingTool` | tool | `clearSketch()`（叠加下不清面） |
+| `overlayShapes` | shapes（deep） | `applyShapeMeta`：增删 + 重排字母颜色 |
+| `overlayActiveShape` | activeShapeId | 刷虚线/实线 |
+| `overlaySelected` | shapeSelected | `focusShape`：高亮 + fit |
+| `overlayResult` | overlayResult | `setOverlayResult` / `clearOverlayResult` |
+
+#### ⑥ 实测基线（照此对表）
+
+**3 个两两相交的圆**：
+
+```
+原子面 7 块，members = s1 | s2 | s3 | s1+s3 | s1+s2 | s2+s3 | s1+s2+s3
+                     ← 正好是维恩图的 7 块，一块不多一块不少
+
+并集 4.087 km² / 165 个
+交集 0.968 km² /  54 个
+按重叠度  1 重 1.533 / 52    2 重 1.586 / 59    3 重 0.968 / 54
+```
+
+**两条恒等式必须成立**（不成立就说明细分错了）：
+
+```
+1.533 + 1.586 + 0.968 = 4.087 = 并集面积   ✅
+  52  +   59  +   54   =  165  = 并集设施数 ✅
+```
+
+第三条（导出时才有）：
+
+```
+「明细按 deg 计数」== 「汇总按 deg 统计」   ✅
+```
+
+因为原子面互不重叠 ⇒ 每个 POI 恰好落在一个原子里 ⇒ `deg` 唯一确定，不需要任何去重。
+
+#### ⑦ 接口
+
+```
+POST /api/poi/overlay
+{
+  "shapes": [
+    { "id":"s1", "name":"A", "kind":"area",   "wkt":"POLYGON((...))" },   // 4326
+    { "id":"s2", "name":"B", "kind":"circle", "lon":114.3, "lat":30.55, "radius":800 }
+  ],
+  "withItems": false
+}
+```
+
+**为什么是 POST 不是 GET**（对比 `/within` 还是 GET）：
+
+1. 6 个面 × 每个几百个顶点，拼进请求行会撞 Tomcat 默认 **8KB** 上限
+2. WKT 里的 `+` 在 query string 会被解成空格
+
+**圆为什么传 `lon/lat/radius` 而不是 WKT 多边形**：前端那个圆是 3857 投影里的圆，转成 WKT 只是它在 WGS84 下的近似；交给 `ST_Buffer(::geography, r)` 得到的才是**地面正圆**，和 `/api/poi/nearby` 的 `ST_DWithin(geom::geography, ...)` 完全同口径。
+
+**坐标系的四道关**（漏一道几何就飞到地球外，而且不报错）：
+
+```
+OL 内部 3857 ──toWkt()──→ 4326 WKT ──JSON──→ 后端 ST_GeomFromText(...,4326)
+                                              ↓
+前端 3857 ←──readFeatures(4326→3857)── 后端 ST_AsGeoJSON（永远输出 4326）
+```
+
+> 与悬停高亮正好相反：那边 `GetFeatureInfo` 的几何**跟着请求的 SRS 走，不能再转**。
+
+#### ⑧ 图例与设施明细预览（同日补）
+
+**图例新增第三种模式 `degree`**
+
+```
+poi    类别色点（学校蓝 / 医院红 / …）
+heat   数值色带（0.2–1 倍 / …）
+degree 重叠度色阶（1 重 / 2 重 / 3 重 …）   ← 新增
+```
+
+三套互斥、不并排。`degrees` 由 App 从 `byDegree` 映射后传入，**只列实际出现的档**
+（3 个面不一定有三重重叠区，凭空补一档会让图例和地图对不上）。
+没有结果时显示「叠满 2 个面后显示」，而不是留一个空框。
+
+**设施明细按需加载**
+
+```
+面板主请求   withItems: false  →  4 KB
+展开明细时   withItems: true   → 26 KB
+```
+
+面板里「设施明细 · 展开 N 条」展开时才发第二次请求；收起再展开复用已有数据。
+`overlayItems` 在 `overlayResult` 被替换时**立即清空** —— 否则会出现
+「列表还是旧的 165 条，统计已经换了一组面」，两块信息互相对不上比不显示更糟。
+
+面板最多列 60 条（288px 宽的卡片列 165 条没人看），其余靠导出 CSV。
+deg 徽标颜色与地图色块、图例同一份 `DEGREE_COLORS`。
+
+**一个纯显示层的坑**
+
+后端把「各度面积」和「并集面积」**分别**四舍五入到 3 位，再各自按 2 位显示，
+可能落到 4.27 / 4.28 两侧，于是底部那句「各度相加 4.28 = 并集 4.27」自相矛盾。
+
+实测全精度下 `sum(ST_Area(原子面))` 与 `ST_Area(并集)` **完全相等（差 0 m²）**，
+所以是显示误差。判定改成比**格式化后的字符串**：
+
+```js
+const sText = fmtKm2(degreeSum.value)
+const uText = fmtKm2(union.value.areaKm2)
+return `${sText} ${sText === uText ? '=' : '≈'} 并集`
+```
+
+用容差没有用 —— 容差算得再细，也挡不住「两次独立四舍五入落在边界两侧」。
+
+#### ⑨ 还没做的
+
+| 项 | 说明 |
+|---|---|
+| 组合明细表 | 「A∩B 是多少面积」—— `members` 已返回，面数 ≤ 4 时可在面板加一段 |
+| 明细翻页 | 面板只列前 60 条，全部靠导出 CSV |
+
+---
+
 ### 2.5 可以一直不做的（先不做）
 
 | 组件 | 替代方案 |
@@ -1373,7 +1648,7 @@ nullif(nullif(raw->'biz_ext'->>'open_time','[]'),'')       as open_time
 
 ---
 
-## 5. 后端接口契约（7 个已实现，2026-10-31）
+## 5. 后端接口契约（8 个已实现，2026-11-02）
 
 > 原则：**键永远存在，缺值给 `null`**；不透传高德原始 JSON。
 
@@ -1388,6 +1663,7 @@ nullif(nullif(raw->'biz_ext'->>'open_time','[]'),'')       as open_time
 | 5 | `GET /api/poi/nearby` | ✅ D8 | `lon` `lat` [radius=800] [limit=5] | 114.36,30.54,800 → count 124 |
 | 6 | `GET /api/poi/within` | ✅ 2026-10-31 | `wkt` [limit=20] | 三角形 → count 125 / areaKm2 5.85 |
 | 7 | `GET /api/stats/coverage` | ✅ D9 | `adcode` | 420106 → total 1681 / perKm2 16.8 |
+| 8 | `POST /api/poi/overlay` | ✅ 2026-11-02 | body `shapes[]` [withItems=false] | 3 面 → 并集 4.087km²/165 个，7 块原子面；withItems=true 时 26KB / 165 条明细 |
 
 **约定**：JSON 字段**全驼峰**（`amapId` / `radiusM` / `byCategory` / `areaKm2`）；`photos` 恒为数组（无照片时 `[]`）；
 HTTP 错误统一 `{timestamp,status,error,message,path}` —— `message` 里是具体原因（2026-10-31 打开
@@ -1627,6 +1903,76 @@ HTTP 错误统一 `{timestamp,status,error,message,path}` —— `message` 里�
 > 只要数量可加 `resultType=hits`（512 字节）。没选它的原因：① byCategory 分组得前端自己数；
 > ② `wuhan:poi` 图层**没有暴露 `gid`**（GeoServer 建图层时没配主键列），拿到要素也点不回详情；
 > ③ 与详情卡已用的 `/api/poi/nearby` 两套数据源，口径迟早对不上。
+
+---
+
+### 5.6 已实现（2026-11-02）—— 多面叠加分析
+
+```jsonc
+// POST /api/poi/overlay
+// 请求：2–6 个面；withItems 默认 false
+{
+  "shapes": [
+    { "id": "s1", "name": "A", "kind": "circle", "lon": 114.3, "lat": 30.55, "radius": 800 },
+    { "id": "s2", "name": "B", "kind": "area", "wkt": "POLYGON((...))" }  // ← 4326
+  ],
+  "withItems": false
+}
+
+// 响应（实测 3 个圆：4151 bytes / withItems=true 时 26624 bytes）
+{
+  "shapeCount": 3,
+
+  "union": {
+    "areaKm2": 4.087,
+    "poi": 165,
+    "byCategory": { "school": 37, "hospital": 68, "mall": 54, "park": 6 }
+  },
+
+  "intersect": {                    // 被全部 n 个面同时覆盖
+    "empty": false,                 // ★ 没有共同重叠区时 true，此时面积/设施都是 0
+    "areaKm2": 0.968,
+    "poi": 54
+  },
+
+  "byDegree": [                     // ★ 主输出：按「被几层覆盖」分组，永远 ≤ n 行
+    { "deg": 1, "faceCnt": 2, "areaKm2": 1.533, "poi": 52 },
+    { "deg": 2, "faceCnt": 2, "areaKm2": 1.586, "poi": 59 },
+    { "deg": 3, "faceCnt": 1, "areaKm2": 0.968, "poi": 54 }
+  ],
+
+  "shapes": [                       // 每个面各自的量（面板列表用）
+    { "id": "s1", "name": "A", "kind": "circle", "areaKm2": 1.996, "poi": 101 }
+  ],
+
+  "geometry": {                     // 原子面 FeatureCollection（WGS84）
+    "type": "FeatureCollection",
+    "features": [
+      { "type": "Feature",
+        "properties": { "deg": 3, "members": ["s1", "s2", "s3"] },  // ★ deg 决定填色
+        "geometry": { "type": "Polygon", "coordinates": [ /* ... */ ] } }
+    ]
+  },
+
+  "items": [],                      // withItems=false → 空数组
+  "itemsTotal": 0                   // withItems=true → 明细条数（可能 > items.length，被 5000 截断）
+}
+```
+
+**`items[]` 每条的字段**（`withItems: true` 时）：
+
+```jsonc
+{ "gid": 2493, "name": "湖北中医药大学昙华林校区", "category": "school",
+  "lon": 114.307201, "lat": 30.552886,
+  "deg": 3,                       // ★ 该设施被几层覆盖 —— 因为原子面互不重叠，这个值唯一确定
+  "members": ["s1", "s2", "s3"] } // 覆盖它的面
+```
+
+**排序**：`items` 按 `deg DESC, gid`，核心区在前 —— 万一撞上 5000 上限被截断，丢的是边缘。
+
+**校验**（`PoiService.overlay`）：面数 2–6、`kind` 只能是 `area`/`circle`、
+圆的经纬度范围与半径 `(50, 5000]`、WKT 必须是 `POLYGON`/`MULTIPOLYGON` 且 ≤ 6000 字符。
+**不校验几何有效性** —— 手绘容易自相交，一个坏面不该让整批 400，SQL 里 `ST_MakeValid` 就地修。
 
 ---
 

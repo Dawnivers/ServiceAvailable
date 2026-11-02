@@ -23,7 +23,7 @@
  * ════════════════════════════════════════════════════════════
  */
 
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 import { CATEGORIES, DEGREE_COLORS } from '@/stores/analysis.js'
 import { splitPercent } from '@/utils/percent'
 
@@ -41,9 +41,16 @@ const props = defineProps({
   selected: { type: String, default: null },
   // 导出中：要额外拉一次设施明细，期间按钮显示「导出中…」
   exporting: { type: Boolean, default: false },
+
+  // ── 设施明细（主接口默认不带，展开时才拉）──
+  // [{ gid, name, category, lon, lat, deg, members }]
+  items: { type: Array, default: () => [] },
+  itemsTotal: { type: Number, default: 0 },
+  itemsLoading: { type: Boolean, default: false },
+  itemsError: { type: String, default: null },
 })
 
-const emit = defineEmits(['remove', 'select', 'clear', 'retry', 'export'])
+const emit = defineEmits(['remove', 'select', 'clear', 'retry', 'export', 'load-items'])
 
 // ── 派生 ───────────────────────────────────────────────────
 const union = computed(() => props.result?.union ?? null)
@@ -83,6 +90,25 @@ const degreeSum = computed(() =>
   degreeRows.value.reduce((a, d) => a + (Number(d.areaKm2) || 0), 0),
 )
 
+/**
+ * 底部那句校验文案。
+ *
+ * ★ 后端把「各度面积」和「并集面积」**分别**四舍五入到 3 位，
+ *   两边相加后再各自按 2 位显示，可能落到 4.27 / 4.28 两侧 ——
+ *   直接写「4.28 = 4.27」会让人以为算错了。
+ *   （实测：全精度下 sum(原子面) 与并集**完全相等**，差 0 m²，
+ *     所以这是纯显示误差，不是数据问题。）
+ * ★ 判定用**格式化后的字符串**比一次，不搞容差：
+ *   容差算得再细，也挡不住"两次独立四舍五入落在边界两侧"这种事。
+ */
+const degreeSumText = computed(() => {
+  const u = union.value?.areaKm2
+  const sText = fmtKm2(degreeSum.value)
+  if (!Number.isFinite(Number(u))) return sText
+  const uText = fmtKm2(u)
+  return `${sText} ${sText === uText ? '=' : '≈'} 并集`
+})
+
 // ── 格式化 ─────────────────────────────────────────────────
 function fmtKm2(v) {
   const n = Number(v)
@@ -112,6 +138,41 @@ function barStyle(row) {
 function shapeSub(s) {
   return s.kind === 'circle' ? `缓冲圈 ${Math.round(s.radius ?? 0)} m` : '手绘面'
 }
+
+// ── 设施明细 ────────────────────────────────────────────────
+/**
+ * 明细展开态是**组件本地状态**（不是 store）：
+ * 它只影响这一个面板长什么样，和地图、和接口都没关系，
+ * 放 store 里反而会变成"刷新页面还记得上次展开着"的假持久化。
+ */
+const showItems = ref(false)
+
+/** 面板里最多列这么多行；再多就靠导出 CSV —— 288px 宽的卡片列 165 条没人看 */
+const ITEM_MAX = 60
+const shownItems = computed(() => props.items.slice(0, ITEM_MAX))
+
+/** 标题上那个条数：优先用后端给的总数（可能大于实际返回的条数） */
+const itemsTotalHint = computed(() => props.itemsTotal || union.value?.poi || 0)
+
+/**
+ * 展开时才去拉明细。
+ * ★ 主接口默认 withItems=false（4KB vs 26KB），所以第一次展开必然要补一次请求；
+ *   收起再展开时如果已有数据就复用，不重复打接口。
+ */
+function toggleItems() {
+  showItems.value = !showItems.value
+  if (showItems.value && !props.items.length && !props.itemsLoading) {
+    emit('load-items')
+  }
+}
+
+/** deg 徽标颜色：和地图色块、左下角图例同一份色板 */
+function degColor(deg) {
+  return DEGREE_COLORS[Math.min(Number(deg) || 1, DEGREE_COLORS.length) - 1]
+}
+
+const catLabel = (key) => CATEGORIES.find((c) => c.key === key)?.label ?? key ?? ''
+
 </script>
 
 <template>
@@ -209,8 +270,51 @@ function shapeSub(s) {
         </li>
       </ul>
 
+      <!-- 设施明细（默认收起，展开才拉数据） -->
+      <div class="divider divider-row">
+        <span class="divider-label">设施明细</span>
+        <button class="toggle" type="button" @click="toggleItems">
+          {{ showItems ? '收起' : `展开 ${itemsTotalHint} 条` }}
+        </button>
+      </div>
+
+      <template v-if="showItems">
+        <div v-if="itemsLoading" class="state">
+          <span class="spin" />
+          正在加载明细…
+        </div>
+
+        <div v-else-if="itemsError" class="hint-inline">
+          {{ itemsError }}
+          <button class="link" type="button" @click="emit('load-items')">重试</button>
+        </div>
+
+        <!-- 结果刚变过（面/半径改了）→ 明细被清空，给一个重新加载的入口 -->
+        <div v-else-if="!items.length" class="hint-inline">
+          <button class="link" type="button" @click="emit('load-items')">
+            点击加载设施明细
+          </button>
+        </div>
+
+        <template v-else>
+          <ul class="items">
+            <li v-for="(x, i) in shownItems" :key="x.gid ?? i" class="item">
+              <!-- 数字就是这个设施被几层覆盖，颜色和地图色块一致 -->
+              <span class="deg-badge" :style="{ background: degColor(x.deg) }">
+                {{ x.deg }}
+              </span>
+              <span class="item-name" :title="x.name">{{ x.name || '未命名' }}</span>
+              <span class="item-cat">{{ catLabel(x.category) }}</span>
+            </li>
+          </ul>
+          <div v-if="items.length > shownItems.length" class="more">
+            还有 {{ items.length - shownItems.length }} 条，导出 CSV 查看全部
+          </div>
+        </template>
+      </template>
+
       <div class="foot">
-        重叠区互不重复，各度面积相加 {{ fmtKm2(degreeSum) }} = 并集
+        重叠区互不重复，各度面积相加 {{ degreeSumText }}
       </div>
     </template>
 
@@ -250,7 +354,11 @@ function shapeSub(s) {
   backdrop-filter: blur(6px);
   font-family: 'Microsoft YaHei', 'Segoe UI', sans-serif;
   color: #2b4359;
-  overflow: hidden;
+  /* ★ 整卡滚动，而不是让「按重叠度」自己滚：
+     展开设施明细后内容可能有一屏多，让内部某一段单独滚会很难操作
+     （滚轮停在别的区就不动了）。头尾各 sticky 一格，按钮永远够得着。 */
+  overflow-y: auto;
+  overscroll-behavior: contain;
 }
 
 /* ═══ 标题 ═══ */
@@ -260,6 +368,11 @@ function shapeSub(s) {
   gap: 8px;
   padding: 12px 14px 8px;
   flex: none;
+  /* 卡片整体滚动，标题钉在顶上 */
+  position: sticky;
+  top: 0;
+  z-index: 2;
+  background: rgba(255, 255, 255, 0.97);
 }
 .head-title {
   flex: none;
@@ -436,6 +549,44 @@ function shapeSub(s) {
   color: #a8bccd;
   flex: none;
 }
+/* 右侧带操作按钮的分隔条（设施明细的展开/收起） */
+.divider-row {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+.divider-label {
+  flex: none;
+}
+.toggle {
+  flex: none;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #1565c0;
+  font-family: inherit;
+  font-size: 10.5px;
+  font-weight: 700;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+.toggle:hover {
+  text-decoration: underline;
+}
+/* 文本样式的行内按钮（重新加载 / 重试） */
+.link {
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: #1565c0;
+  font-family: inherit;
+  font-size: 11.5px;
+  cursor: pointer;
+}
+.link:hover {
+  text-decoration: underline;
+}
 
 /* ═══ 并集大数字 ═══ */
 .summary {
@@ -534,9 +685,8 @@ function shapeSub(s) {
   margin: 0;
   padding: 0 14px 8px;
   list-style: none;
-  flex: 1;
-  min-height: 0;
-  overflow-y: auto;
+  /* ★ 不再自己滚：整卡统一滚动（见 .ov-card 的说明） */
+  flex: none;
 }
 .deg {
   display: flex;
@@ -577,6 +727,54 @@ function shapeSub(s) {
   flex: none;
 }
 
+/* ═══ 设施明细列表 ═══ */
+.items {
+  margin: 0;
+  padding: 0 14px 4px;
+  list-style: none;
+  flex: none;
+}
+.item {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  padding: 3px 0;
+  font-size: 11.5px;
+}
+/* 数字徽标：就是"这个设施被几层覆盖"，颜色跟地图色块同一套 */
+.deg-badge {
+  flex: none;
+  width: 16px;
+  height: 16px;
+  border-radius: 4px;
+  color: #fff;
+  font-size: 9.5px;
+  font-weight: 700;
+  line-height: 16px;
+  text-align: center;
+  font-variant-numeric: tabular-nums;
+}
+.item-name {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #2b4359;
+}
+.item-cat {
+  flex: none;
+  font-size: 10px;
+  color: #a8bccd;
+  white-space: nowrap;
+}
+.more {
+  padding: 2px 14px 8px;
+  font-size: 10px;
+  color: #b7c7d6;
+  flex: none;
+}
+
 /* ═══ 底部动作（导出 / 清空 并排）═══ */
 .actions {
   display: flex;
@@ -584,6 +782,11 @@ function shapeSub(s) {
   padding: 8px 14px 12px;
   border-top: 1px solid #f0f4f8;
   flex: none;
+  /* 卡片整体滚动时，这两个按钮钉在底部 */
+  position: sticky;
+  bottom: 0;
+  z-index: 2;
+  background: rgba(255, 255, 255, 0.97);
 }
 .act {
   flex: 1;
