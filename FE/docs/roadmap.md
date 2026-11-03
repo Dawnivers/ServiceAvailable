@@ -2,7 +2,7 @@
 
 > 面向 `FE`（Vue 3 + Vite + OpenLayers）的开发清单。
 > 数据侧（采集/入库）见 `etl/spec.md`；服务侧（发布/样式）见本文 §7。
-> 最后更新：2026-10-31（D13 收尾）
+> 最后更新：2026-11-03（进度同步：补记 F2–F5）
 
 ## 0. 项目形态（两张图定方向）
 
@@ -29,14 +29,18 @@
 | **D13** ✅ | 缓冲区分析（**2026-10-31 已完成**） | 点选 → 800 m 圆 → 统计卡片；外加任意多边形 `within` | D9 的 `nearby` 接口 |
 | **D14–D15** | 缓冲区收口 / 抢进 D16（**跳过**，见 §2.4.8「建议选 B」） | 多点对比、分类高亮专题图 | D13 |
 | **D16–D18** ✅ | 格网 + 热力图（**2026-11-01 完成**） | `grid_500m` 表 + `wuhan:grid_500m` 图层 + 5 个 SLD + 前端可切换/可点选 | PostGIS 空间函数 |
-| **D19–D20** | 打磨 + 录屏 + README | 30 秒演示视频、截图、录屏 | 以上全部 |
-| **D21** | 复盘 + 投递 | 简历 + 项目自述 | — |
+| **F2–F3** ✅ | 悬停高亮 + 选中态 + 类别联动（**2026-11-01 完成**） | `map/probe.js` 统一探针 + `map/hover.js` 悬停/选中双图层；缓冲圈半径按 1/cos 补偿（§2.4.15） | D18 的 `gridInfo` / `heatmap` |
+| **F5** ✅ | 叠加分析（**2026-11-02 完成**） | 2–6 个面：并集 / 交集 / 按重叠度分组 + 原子面出图 + CSV 导出（§2.4.14、§5.6） | 新增 `POST /api/poi/overlay` |
+| **D19–D20** ⏳ | 打磨 + 录屏 + README | README ✅ 11-03（已含 F5 与悬停）、12 张截图 ✅（**缺 F5 / 悬停两张**）、30 秒录屏 ❌ | 以上全部 |
+| **D21** | 复盘 + 投递 | 简历 + 项目自述（仓库已上 GitHub：`Dawnivers/ServiceAvailable`） | — |
 
-> **当前站位（2026-11-01 20:30）**：**D18 完成 → D19 起点**。
-> 后端 7 接口 / 格网表 / GeoServer 5 个样式 / 前端热力图（含点格弹窗）全部就绪，
-> 详见 §2.4.9–§2.4.13。剩下的只有 D19–D21 的「**展示与投递**」：录屏、README、简历。
+> **当前站位（2026-11-03 复核）**：**F5 完成 → D19 中段**。
+> 后端 **8** 接口（含 `/overlay`）/ 格网表 / GeoServer **8** 个样式（`poi_*` 3 + `grid_*` 5）/
+> 前端 5 大能力（浏览、详情、缓冲区、热力图、叠加）全部就绪，版本已由 git 接管（56 个提交、有远端）。
+> 详见 §2.4.9–§2.4.15。剩下的只有「**展示与投递**」两件：30 秒录屏、简历与项目自述。
 >
-> 进度账：计划 D5→D18 是 14 个工作日；实际 2026-10-27 → 11-01 用 **6 个自然日**走完（约 2.3×）。
+> 进度账：计划 D5→D18 是 14 个工作日；实际 2026-10-27 → 11-01 用 **6 个自然日**走完（约 2.3×）；
+> F2–F5 又吃掉 11-01 晚 + 11-02 一整天。
 
 ---
 
@@ -535,7 +539,8 @@ drawing.setCenter(analysis.center)          // ③ 最后画圆，不会再被�
 
 ### 2.4.7 D13 验收台账（2026-10-31 收尾）
 
-> 核对方式：`roadmap` §8 的判据逐条实测（本仓库未接 git，改用接口实跑 + 文件时间戳）。
+> 核对方式：`roadmap` §8 的判据逐条实测（D13 当时本仓库未接 git，改用接口实跑 + 文件时间戳。
+> **2026-11-03 补注**：仓库此时已由 git 接管，远端 `Dawnivers/ServiceAvailable`，共 56 个提交）。
 
 | §8 判据 | 实测证据 | 结果 |
 |---|---|---|
@@ -1479,11 +1484,184 @@ return `${sText} ${sText === uText ? '=' : '≈'} 并集`
 
 ---
 
+### 2.4.15 F2–F3：悬停、选中态、类别联动、缓冲圈半径（2026-11-01 完成）
+
+> 本节 2026-11-03 补记。F2/F3 的提交时间（11-01 20:42–21:06）其实**早于** §2.4.14 的 F5，
+> 当时只顾着往上堆功能没写文档，现在按代码补账。
+
+#### ① 为什么必须"问一次再画"
+
+POI 与热力图都是 `ImageLayer + ImageWMS`——服务器渲好的一张位图，
+**浏览器里没有 Feature**，`forEachFeatureAtPixel()` 永远返回空（§2.3 已记过一次）。
+所以悬停链路只能是：
+
+```
+pointermove → GetFeatureInfo 问服务器「这个像素是什么」→ 拿回 geometry → 画到自己的 VectorLayer
+```
+
+`map/probe.js` 就是把这一步抽成唯一入口：`probeFeature(map, evt, layerId, extra, opts)`
+→ `{ id, geometry, properties, url }`（`url` 留着自己能复现那一条请求）。
+
+| 设计 | 取值 | 理由 |
+|---|---|---|
+| 通道 | **GetFeatureInfo**（不是 WFS） | 只回 1 个要素 ≈ 700 B / 实测 **12 ms**；WFS 回整窗要素几百 KB |
+| 坐标 | **不做投影变换** | 回来的几何跟着请求的 `SRS`（= view 投影 3857）走；再按 4326 解会把米当度 |
+| 取要素 | `opts.requireContain` 逐个 `intersectsCoordinate` | 一个像素能压 4 个格子，GeoServer 返回顺序无保证 |
+| 失败 | 先 `text()` 再 `JSON.parse` | GeoServer 抛错是 **HTTP 200 + XML**，直接 `.json()` 只会报 `Unexpected token '<'` |
+
+#### ② 悬停与选中必须是**两个**图层
+
+| 图层 | zIndex | className | 样式语义 |
+|---|---|---|---|
+| 悬停 `source` | 90 | `ol-hover` | 临时指示：深墨蓝双描边 / 白晕 + 蓝光圈，标签是深色药丸 |
+| 选中 `selSource` | 91 | `ol-select` | 已定下的对象：主色 `#1565C0` 实线 + 常驻标签，POI 半径 18（悬停 15） |
+
+**共用一个 source 就会互相擦**：用户「选中 A 格，鼠标划过 B 格」是正常操作，
+悬停清场（`source.clear()`）会把选中一起抹掉。两个 className 都**不挂 `ol-layer-base`**
+——分析模式下它们也不该被去色。
+
+**热力格子的双描边是故意的**：外圈深墨（浅黄格上撑边界）+ 内圈白（深红格上才看得见），
+一条线做不到"在哪一档背景上都清楚"。
+
+**性能靠四道锁**（`hover.js` 顶部常量）：
+
+| 锁 | 阈值 | 拦什么 |
+|---|---|---|
+| 时间锁 `THROTTLE_MS` | 90 ms | 连续移动时狂发请求；冷却结束补一次，保证停下时最后一格也能亮 |
+| 位移锁 `MIN_PIXEL_MOVE` | 5 px | 手抖 |
+| 结果锁 `lastId` | — | 还在同一格 → 不重画 |
+| `inFlight` | — | 慢请求堆叠 |
+
+拖动地图时（`evt.dragging`）一律不查。
+
+#### ③ 三个只在运行时暴露的坑
+
+**坑 1：模式名 ≠ 图层 id，静默失效**
+
+```js
+const LAYER_OF = { grid: 'heat', poi: 'poi' };   // ★ 必须显式映射
+```
+
+模式是 `'grid'`，而图层 `properties.id` 是 `'heat'`。第一版直接把 `mode` 当 layerId 传进探针，
+`probeFeature` 里 `.find(id === layerId)` 找不到 → 返回 `null` → **悬停完全没反应且不报错**。
+POI 因为两者同名（都是 `'poi'`）侥幸能用，所以"一半好用"更容易骗过人。
+
+**坑 2：模式别用 watcher 同步**
+
+第一版用 `registerWatcher` 把 store 推成 `'grid' | 'poi'` 存进闭包变量。
+问题是多了一次状态跳转：watcher 没触发 / 触发时 hover 还没建 / 顺序错开，
+表现都是"悬停全哑"。现在改为 **`resolve()` 回调，每次 `pointermove` 现读一遍 store**：
+
+```js
+resolve() {
+  if (analysis.active) return null;          // 分析模式下鼠标在选中心，不悬停
+  if (layerStore.visible.heat) return 'grid'; // 热力优先（两者在 store 里本就互斥）
+  if (layerStore.visible.poi) return 'poi';
+  return null;
+}
+```
+
+无缓存 → 不存在"没同步上"。`registerWatcher('hoverReset')` 只负责**突变时擦掉残留**，
+不负责传递模式。
+
+**坑 3：低缩放不能静默**
+
+`zoom < MIN_GRID_ZOOM(11)` 时一格不到 2 px，探针会取到邻居格（§2.4.13 ⑤ 坑 1）。
+这里不能"什么都不做"——用户只会觉得悬停坏了。做法是在光标旁浮一句
+`放大到 z11 才能选格子`，并且**复用同一个 Feature 只改坐标**（不重建样式），
+所以提示能跟着鼠标走而不闪烁。
+
+#### ④ 类别联动：图上染什么色，标签就报什么数
+
+```
+选「学校」→ STYLES=wuhan:grid_school → 图上染学校色
+          → 悬停标签 / 点格弹窗也必须只报 school 数，不能报 total
+```
+
+实现只有一行关键：`heatmap.js` 的 `heatCategory(key).field` 去掉 `r_` 前缀就是属性名
+（`r_total → total`、`r_school → school`；公园的 `field` 本来就是 `park`，
+`startsWith('r_')` 判一下两种都吃）。
+
+```js
+const field = c.field.startsWith('r_') ? c.field.slice(2) : c.field;
+return `${properties[field]} 个`;
+```
+
+否则「图上是学校色、标签写着 176」——读者会以为这格有 176 所学校。
+切换类别**不重发请求**：弹窗与标签的数字都来自已有 `properties`，只是取值字段变了。
+
+#### ⑤ 点击路由：热力图优先，POI 其次
+
+```js
+if (analysis.active) return;              // 分析模式：这一下是"选中心"
+if (layerStore.visible.heat) { pickGridFeature() → gridStore.setInfo + hover.setSelected(hit,'grid') }
+else                        { pickPoi()          → selection.setPoi + hover.setSelected(hit,'poi') }
+```
+
+用 `pickGridFeature` / `pickPoi`（返回整条要素）而不是只取属性的 `pickGrid` / `pickGid`
+——选中态要画边框/光圈，没有 geometry 画不出来。
+
+三条清场 watcher（都在 `mapView.vue` 用 `registerWatcher` 注册）：
+
+| id | 监听 | 动作 |
+|---|---|---|
+| `hoverReset` | `analysis.active` / `visible.heat` / `visible.poi` | 进出模式、关图层 → 擦掉悬停与选中 |
+| `gridSelection` | `visible.heat` + `gridStore.hasInfo` | 卡片被清空 → 收掉格子框 |
+| `poiSelection` | `selectionStore.poi` | 详情卡关闭 → 收掉 POI 光圈 |
+
+> **两个必须记住的写法陷阱**：① store 里存的是 `poi` 对象、**没有 `gid` 字段**，
+> 写成 `selection.gid` 的 watcher 永远取到 `undefined`，一次都不会触发；
+> ② `poiSelection` 必须加 `visible.poi` 条件——热力模式下 `selection` 本来就是空的，
+> 不加这层，点格子时前面的 `selection.clear()` 会把刚设好的格子选中框擦掉。
+
+#### ⑥ 缓冲圈画小了：投影米 ≠ 地面米（`1/cos(纬度)`）
+
+**症状**：后端 `ST_DWithin(..., 800)` 说 800 m，图上那个圈明显偏小。
+实测**半径 650 m 的圈被画成了 560 m**（560/650 = 0.861）。
+
+**根因**：`ol/geom/Circle` 的半径单位是**投影米**（EPSG:3857），而
+Web Mercator 在地面纬度 φ 处的尺度因子是 `1/cos(φ)`。武汉 φ≈30.6°，`cos ≈ 0.861`：
+
+```
+投影米 = 地面米 / cos(φ)      ← 画图要放大
+地面米 = 投影米 × cos(φ)      ← 反向验证
+```
+
+直接 `new Circle(c, 800)` 得到的是"投影里 800" = 地面 **688 m**（误差 14%）。
+
+**修法**（`drawing.js`）：
+
+```js
+function toMapRadius(meters, lat) {
+  return meters / Math.cos((lat * Math.PI) / 180);   // 画：地面米 → 投影米
+}
+```
+
+`paintCircle` 与 `resizeCircle`（拖滑杆改半径）**同一个函数**，两条路径不会各说各话。
+§2.4.0 那张"800 m ≈ 84 px @ z14"的账也按补偿后重算才对得上。
+
+> 这类 bug 不会报错、也不会让数字对不上（统计走后端 geography，与画法无关），
+> 只有拿尺子量屏幕才发现。教训：**凡是"地图上画一个已知物理长度"的地方，
+> 都要问一句"这个长度是什么单位"**。
+
+#### ⑦ 提交账（对应 git 08–14）
+
+| 提交 | 交付 |
+|---|---|
+| 08 | 抽出 `probe.js` 统一探针 + 悬停高亮（格子描边 / POI 光圈 + 名称），四道锁 |
+| 09 | 低缩放不再静默，光标旁出「放大到 z11」提示 |
+| 10–11 | 悬停模式改 `resolve()` 现读 store；补 `LAYER_OF`（`grid → heat`） |
+| 12 | 热力类别联动：弹窗与悬停只算当前类，切换不重发请求 |
+| 13 | 选中态独立图层（主色描边 + 常驻标签，与悬停并存） |
+| 14 | 缓冲圈半径 `1/cos(纬度)` 补偿 |
+
+---
+
 ### 2.5 可以一直不做的（先不做）
 
 | 组件 | 替代方案 |
 |---|---|
-| `SearchBox.vue` | 用 WFS 的 `CQL_FILTER` 或直接调后端 |
+| ~~`SearchBox.vue`~~ | **已做（2026-10-31）**：`components/SearchBox.vue` + `map/searchPoi.js`，走 GeoServer **WFS + `CQL_FILTER`** 做名称/地址模糊搜索，前端按相关度重排（`完全相同 > 前缀 > 包含`，同级短名优先），挂在 `TopBar` 里，分析模式下自动弱化 |
 | `Toast.vue` / `LoadingOverlay.vue` | 先用 `console` / OL 自带的 fade |
 | `BaseMapSwitch.vue` | ~~先写死影像底图~~ **已不必做**（2026-10-31）：由 `TopBar.vue` 的两个按钮 + `map/basemaps.js` 换 source 实现，见 §4.1 |
 
@@ -1518,6 +1696,30 @@ src/
     ├── selection.js          (D12)
     └── analysis.js           (D13)
 ```
+
+> **2026-11-03 实况（上面的"目标态"已与仓库不符，以实际文件为准）**：
+> 规划里有、仓库里**没有按这个名字存在**的 5 个，以及它们实际落在了哪：
+>
+> | 规划名 | 实际形态 |
+> |---|---|
+> | `map/useMap.js` | 并进 `view/mapView.vue`（建图/销毁写在 `onMounted` / `onBeforeUnmount`） |
+> | `composables/useLayerSync.js` | `watchControl/watchController.js`（`stops` 栈，§2.4.13 ⑦） |
+> | `composables/useFeatureInfo.js` | `map/probe.js`（统一探针）+ `map/clickToGid.js`（§2.3 第 7 行） |
+> | `components/LegendPanel.vue` | `components/MapLegend.vue`（三模式 `poi` / `heat` / `degree`） |
+> | `styles/main.css` + `styles/panels.css` | 单个 `src/style.css` |
+>
+> 实际多出来的关键文件：
+>
+> | 目录 | 文件 | 职责 |
+> |---|---|---|
+> | `map/` | `probe.js` | WMS `GetFeatureInfo` 统一探针（悬停/点击共用，§2.4.15） |
+> | `map/` | `hover.js` | 悬停高亮 + 选中态两个 VectorLayer |
+> | `map/` | `heatmap.js` | 热力图**唯一真源**：5 类 label / STYLES / 阈值 / 色带 |
+> | `map/` | `gridInfo.js` | 点格取数 + `MIN_GRID_ZOOM` |
+> | `map/` | `searchPoi.js` | WFS `CQL_FILTER` 模糊搜索 + 前端相关度重排 |
+> | `map/` | `drawing.js` | 四种工具 + 叠加面 + 缓冲圈（半径按 `1/cos(φ)` 补偿） |
+> | `watchControl/` | `watchController.js` | **全项目 watch 的唯一注册处**（`stops` 栈，`stopAll`/`stopById`） |
+> | `components/` | `GridPopup.vue` / `OverlayPanel.vue` / `MapLegend.vue` / `MapStatsBar.vue` / `SearchBox.vue` | 点格卡 / 叠加面板 / 三模式图例 / 底部统计 / 搜索框 |
 
 ---
 
@@ -1995,9 +2197,15 @@ HTTP 错误统一 `{timestamp,status,error,message,path}` —— `message` 里�
 |---|---|---|
 | 图层 | `wuhan:admin_area` | 13 区边界 |
 | 图层 | `wuhan:poi` | 16,016 条 POI（数据类型 Point,4326） |
+| 图层 | `wuhan:grid_500m` | 39,820 个 500 m 方格（**默认几何必须是 `geom` 不是 `centroid`**，见 §2.4.10） |
 | 样式 | `wuhan:poi_icons` | SVG 图钉 + 标签 + 两级缩放（**推荐**） |
 | 样式 | `wuhan:poi_badge` | 纯矢量徽章（无外部依赖，兜底用） |
 | 样式 | `wuhan:poi_by_category` | 简单四色圆点（对照用） |
+| 样式 | `wuhan:grid_total` / `_school` / `_hospital` / `_mall` | 按 `r_*` 倍数分档 `[0.2, 1, 3, 10, 25]`（§2.4.11–§2.4.12） |
+| 样式 | `wuhan:grid_park` | **按个数** `[1, 2, 3, ≥4]`，不是倍数（§2.4.12） |
+
+> 源文件都在 `BE/styles/*.sld`；REST 上传时 `Content-Type` **必须带 `charset=UTF-8`**，
+> 否则 GeoServer 按 GBK 解码，预览直接 500（§2.4.11 坑 3）。
 
 > 图钉依赖 URL Checks 放行 `http://localhost:8080/geoserver/www/.*`（配置文件 `data_dir/security/urlchecks.xml`）。
 > 新建样式后记得 `POST /rest/reload`。
@@ -2015,7 +2223,9 @@ HTTP 错误统一 `{timestamp,status,error,message,path}` —— `message` 里�
 | **D12 完成** ✅ | ① 页面上能看到 POI（放大出图钉）② 关闭勾选立即消失 ③ 透明度滑杆生效 ④ Network 里 `STYLES=wuhan:poi_icons` 且 200 ⑤ 拖动不卡成幻灯片 —— **2026-10-30 五条全过** |
 | **D13 完成** ✅ | 点地图 → 画出 800 m 圆 → 右侧数字与 `ST_DWithin` 查询结果一致 —— **2026-10-31 实测**：`114.3687,30.6316` r=800 → count **83**、最近 82 m；多边形 `within` 额外交付（三角形 → 125 条 / 5.85 km²） |
 | **D18 完成** ✅ | 500 m 格网分级渲染（覆盖率热力）+ 图例可读 —— **2026-11-01 实测**：① 39,820 格 / 5 个 SLD 均可渲染 ② 点类别 1 次 GetMap 即换色（`updateParams`）③ 图例随类别在「倍数 / 个数」两套文案间切换 ④ 点格取数正确（z≥11 时江汉路格 total=176，与库内一致）⑤ 进分析模式自动让位并恢复 |
-| **D20 完成** | 30 秒录屏；README 含架构图、启动步骤、5 张截图、踩坑记录 |
+| **F2–F3 完成** ✅ | 悬停有反馈且不刷请求，选中与悬停可并存 —— **2026-11-01 实测**：① 热力格悬停出深/白双描边 + 该格数量，POI 悬停出光圈 + 名称 ② 探针单次 **12 ms**，四道锁（90 ms / 5 px / 结果去重 / inFlight）下拖动不堆积 ③ `z<11` 时不查并浮出「放大到 z11」提示 ④ 选中框与悬停框可同时存在，关卡/切走自动收回 ⑤ 缓冲圈半径按 `1/cos(φ)` 补偿后，图上 800 m 与后端 `ST_DWithin(...,800)` 同口径 |
+| **F5 完成** ✅ | `POST /api/poi/overlay` 3 个两两相交的圆 → 原子面 **7 块**（维恩图一块不多一块不少）；并集 4.087 km² / 165 个，交集 0.968 km² / 54 个；**两条恒等式成立**：1.533+1.586+0.968 = 4.087、52+59+54 = 165 —— **2026-11-02 实测** |
+| **D20 完成** | 30 秒录屏；README 含架构图、启动步骤、5 张截图、踩坑记录 —— **README ✅（2026-11-03 已含叠加分析、悬停/选中共 5 段能力）**，**录屏未录**；`docs/img/` 缺 F5 与悬停两张截图 |
 
 ---
 
