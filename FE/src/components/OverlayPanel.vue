@@ -136,7 +136,11 @@ function barStyle(row) {
 
 /** 面列表里那行小字：来源 */
 function shapeSub(s) {
-  return s.kind === 'circle' ? `缓冲圈 ${Math.round(s.radius ?? 0)} m` : '手绘面'
+  // 2026-11-04：叠加改为路网口径，面不再是圆，而是「沿路网走出来的可达面」
+  const snap = s.snapM ? ` · 偏移 ${Math.round(s.snapM)} m` : ''
+  return s.kind === 'circle'
+    ? `可达面 ${Math.round(s.radius ?? 0)} m${snap}`
+    : '手绘面'
 }
 
 // ── 设施明细 ────────────────────────────────────────────────

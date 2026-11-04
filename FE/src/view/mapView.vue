@@ -382,6 +382,12 @@ registerWatcher(
   (r) => {
     if (r?.geometry?.features?.length) drawing?.setOverlayResult(r.geometry);
     else drawing?.clearOverlayResult();
+
+    // ★ 叠加现在走「路网口径」：除原子面外还带回 surfaces[]
+    //   （每个圆的可达面 + 可达路网）。画到与单点等时圈共用
+    //   surfaceLayer(96) / networkLayer(97) 上，两种模式互斥不会打架。
+    if (r?.surfaces?.length) drawing?.setOverlaySurfaces(r.surfaces);
+    else drawing?.clearIsochrone();
   },
   { flush: 'post' },
 );

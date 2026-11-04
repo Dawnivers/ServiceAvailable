@@ -141,4 +141,25 @@ public class PoiController {
 
         return poiService.isochrone(lon, lat, budget, limit);
     }
+
+    /**
+     * 叠加分析（路网口径）：每个圆先折算成「真实可达面」，再求交。
+     *
+     * <pre>
+     *   POST /api/poi/overlay-network
+     *   { "shapes": [{ "id":"s1","name":"A","kind":"circle","lon":...,"lat":...,"radius":800 }, ...] }
+     * </pre>
+     *
+     * ★ 与 /overlay 的关系：输入都是圆，区别是「用直线圆还是沿路网走出来的面」去求交。
+     *   求交、按重叠度分组、数设施的 SQL 完全复用，不复制。
+     * ★ 返回值在 overlay 的基础上多一个 surfaces[]：
+     *   每个圆的可达面（GeoJSON）+ 可达路网，前端逐个画出来。
+     */
+    @PostMapping("/overlay-network")
+    public JsonNode overlayNetwork(@RequestBody(required = false) OverlayReq req) {
+        if (req == null) {
+            return poiService.overlayNetwork(null, false);
+        }
+        return poiService.overlayNetwork(req.shapes(), Boolean.TRUE.equals(req.withItems()));
+    }
 }

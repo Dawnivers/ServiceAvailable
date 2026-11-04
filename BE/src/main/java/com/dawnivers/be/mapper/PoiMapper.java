@@ -80,4 +80,22 @@ public interface PoiMapper {
                      @Param("lat") double lat,
                      @Param("budget") double budget,
                      @Param("limit") int limit);
+
+    /**
+     * 只要几何的等时圈（给「叠加分析」用）。
+     *
+     * <p>返回 JSON：status / snapM / usedBudgetM / areaKm2 / edgeCount /
+     * surface(GeoJSON) / surfaceWkt(WKT,4326) / skeleton(GeoJSON)。
+     *
+     * <p>★ 为什么单独一条而不是复用 isochrone：
+     * 叠加要的是「面」而不是「面内设施」——设施在细分的原子面上按 deg 统计，
+     * 每个圆各数一遍既慢又会重复计数。
+     *
+     * @param lon    圆心经度
+     * @param lat    圆心纬度
+     * @param budget 步行预算（米），内部会扣掉吸附距离
+     */
+    String isochroneGeom(@Param("lon") double lon,
+                         @Param("lat") double lat,
+                         @Param("budget") double budget);
 }

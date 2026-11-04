@@ -523,6 +523,38 @@ export function createDrawingController(map) {
     networkSource.clear();
   }
 
+  /**
+   * 叠加模式的「多个可达面 + 多条可达路网」。
+   *
+   * @param {Array<{id:string, surface:object, skeleton:object}>} surfaces
+   *        /api/poi/overlay-network 返回的 surfaces[]，几何都是 4326
+   *
+   * ★ 和 setIsochrone 共用同一对图层（surfaceLayer 96 / networkLayer 97）：
+   *   两种模式互斥（叠加模式不做单点等时圈），共用图层反而能保证
+   *   「切模式时旧内容一定被清掉」——各自一套 source 才容易出现残留。
+   */
+  function setOverlaySurfaces(surfaces) {
+    surfaceSource.clear();
+    networkSource.clear();
+    if (!Array.isArray(surfaces) || !surfaces.length) return;
+
+    const fmt = new GeoJSON();
+    const opts = { dataProjection: 'EPSG:4326', featureProjection: proj() };
+
+    for (const s of surfaces) {
+      if (s?.surface) {
+        surfaceSource.addFeatures(
+          fmt.readFeatures({ type: 'Feature', properties: {}, geometry: s.surface }, opts),
+        );
+      }
+      if (s?.skeleton) {
+        networkSource.addFeatures(
+          fmt.readFeatures({ type: 'Feature', properties: {}, geometry: s.skeleton }, opts),
+        );
+      }
+    }
+  }
+
   /** 开关叠加模式。关掉时把面与结果一起收干净 */
   function setOverlay(v) {
     overlay = !!v;
@@ -714,6 +746,8 @@ export function createDrawingController(map) {
     // ── 路网等时圈 ──
     setIsochrone,
     clearIsochrone,
+    // ── 叠加（路网口径）：多个可达面 + 多条路网 ──
+    setOverlaySurfaces,
 
     // 只读一下当前状态，方便调试
     get tool() {

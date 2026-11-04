@@ -91,7 +91,14 @@ export function useBufferAnalysis() {
       let init;
 
       if (isOverlay) {
-        url = '/api/poi/overlay';
+        /**
+         * ★ 2026-11-04：叠加走「路网口径」端点。
+         *   每个圆先折算成真实可达面（Dijkstra + 50 m 缓冲），再求交 ——
+         *   所以返回里除了 union/intersect/byDegree/几何，还多一个 surfaces[]，
+         *   前端靠它把「每个圈的可达面 + 可达路网」一起画出来。
+         *   /api/poi/overlay（直线圆版）保留，用于对照或回退。
+         */
+        url = '/api/poi/overlay-network';
         init = {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },

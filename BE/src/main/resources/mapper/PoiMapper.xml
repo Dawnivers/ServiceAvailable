@@ -575,4 +575,84 @@ SELECT json_build_object(
     )::text
 </select>
 
+<!-- ════════════════════════════════════════════════════════════════
+     等时圈「只要几何」版：给叠加分析用（2026-11-04）
+
+     与上面的 isochrone 的区别：
+       ① 不统计面内设施（叠加那边由细分 SQL 统一按 deg 数，不重复算）
+       ② 额外返回 surfaceWkt —— 叠加的平面细分吃 WKT，不吃 GeoJSON
+       ③ 简化容差放宽到 0.00005（约 5 m）：一次要返回 2–6 个面 + 6 条路网，
+          2 m 精度会到 400 KB+；5 m 在街区尺度上看不出差别
+     ════════════════════════════════════════════════════════════════ -->
+<select id="isochroneGeom" resultType="java.lang.String">
+    WITH params AS (
+        SELECT ST_SetSRID(ST_MakePoint(#{lon}, #{lat}), 4326) AS click,
+               #{budget}::numeric AS budget
+    ),
+    snap AS MATERIALIZED (
+        SELECT c.node_id, c.snap_m
+        FROM (
+            SELECT v.id AS node_id,
+                   ST_Distance(v.geom::geography, p.click::geography) AS snap_m
+            FROM walk_ways_vertices_pgr v, params p
+            ORDER BY v.geom &lt;-&gt; p.click
+            LIMIT 5
+        ) c
+        ORDER BY c.snap_m
+        LIMIT 1
+    ),
+    used AS MATERIALIZED (
+        SELECT s.node_id, s.snap_m, p.budget,
+               GREATEST(p.budget - s.snap_m, 0) AS used_budget
+        FROM snap s, params p
+    ),
+    dd AS MATERIALIZED (
+        SELECT node, edge, agg_cost
+        FROM pgr_drivingDistance(
+            'SELECT id, source, target, length_m AS cost, length_m AS reverse_cost FROM walk_ways',
+            (SELECT node_id FROM used),
+            (SELECT used_budget FROM used),
+            false)
+        WHERE edge &lt;&gt; -1
+    ),
+    partial AS MATERIALIZED (
+        SELECT ST_LineSubstring(w.geom,
+            CASE WHEN w.source = d.node THEN 0
+                 ELSE 1 - LEAST(1, (u.used_budget - d.agg_cost) / NULLIF(w.length_m, 0)) END,
+            CASE WHEN w.source = d.node
+                 THEN LEAST(1, (u.used_budget - d.agg_cost) / NULLIF(w.length_m, 0))
+                 ELSE 1 END) AS geom
+        FROM dd d
+        JOIN walk_ways w ON (w.source = d.node OR w.target = d.node)
+        CROSS JOIN used u
+        WHERE u.used_budget &gt; 0
+          AND d.agg_cost + w.length_m &gt; u.used_budget
+          AND w.id NOT IN (SELECT edge FROM dd)
+    ),
+    skel AS MATERIALIZED (
+        SELECT ST_LineMerge(ST_Collect(ARRAY[
+            (SELECT ST_Collect(w.geom) FROM dd JOIN walk_ways w ON w.id = dd.edge),
+            (SELECT ST_Collect(geom) FROM partial)
+        ])) AS g
+    ),
+    surf AS MATERIALIZED (
+        SELECT ST_MakeValid(
+            ST_Buffer(ST_Simplify(g, 0.00005)::geography, 50, 'quad_segs=2')::geometry
+        ) AS p,
+        g AS skel_geom
+        FROM skel
+    )
+    SELECT json_build_object(
+        'status',      CASE WHEN (SELECT used_budget FROM used) &lt;= 0
+                            THEN 'no_network' ELSE 'ok' END,
+        'snapM',       (SELECT round(snap_m) FROM used),
+        'usedBudgetM', (SELECT round(used_budget) FROM used),
+        'areaKm2',     (SELECT round((ST_Area(p::geography) / 1e6)::numeric, 3) FROM surf),
+        'edgeCount',   (SELECT count(*) FROM dd),
+        'surface',     (SELECT ST_AsGeoJSON(ST_Simplify(p, 0.00005), 5)::json FROM surf),
+        'surfaceWkt',  (SELECT ST_AsText(ST_Simplify(p, 0.00005)) FROM surf),
+        'skeleton',    (SELECT ST_AsGeoJSON(ST_Simplify(skel_geom, 0.00005), 5)::json FROM surf)
+    )::text
+</select>
+
 </mapper>

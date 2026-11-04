@@ -603,8 +603,25 @@ export const useAnalysisStore = defineStore('analysis', {
       this.overlayError = null;
       this.overlayMs = ms;
 
+      /**
+       * ★ 2026-11-04：叠加走「路网口径」后，每个圆真正的面积不再是 πr²，
+       *   而是沿路网走出来的可达面（实测同一个 800 m 圈能从 2.01 掉到 0.21）。
+       *   面板上的面列表读的是 store.shapes[].areaKm2，这里用后端返回值覆盖，
+       *   否则会出现「列表写 2.01、下面的并集写 1.92」这种自相矛盾。
+       *   顺带把 snapM 记下来，面列表可以显示"起点偏移"。
+       */
+      const byId = new Map((result?.surfaces ?? []).map((s) => [s.id, s]));
+      if (byId.size) {
+        this.shapes = this.shapes.map((s) => {
+          const hit = byId.get(s.id);
+          return hit
+            ? { ...s, areaKm2: hit.areaKm2 ?? s.areaKm2, snapM: hit.snapM ?? null }
+            : s;
+        });
+      }
+
       // ★ 结果一换，明细立刻作废。
-      //   否则会出现「列表明明还是旧的 165 条，统计却已经换了一组面」——
+      //   否则会出现「列表明明还是旧的 165 条，统计却已经换了一组面」——，
       //   两块钱信息互相对不上，比不显示更糟。
       this.clearOverlayItems();
     },

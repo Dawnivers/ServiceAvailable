@@ -259,6 +259,142 @@ public class PoiService {
     }
 
     // ══════════════════════════════════════════════════════════
+    //  叠加分析（路网口径）：每个圆先算成「可达面」，再求交
+    // ══════════════════════════════════════════════════════════
+
+    /**
+     * 多个步行圈的叠加：每个圆先折算成真实可达面（路网 800 m + 50 m 缓冲），
+     * 再把这些面交给平面细分求交。
+     *
+     * <p>与 {@link #overlay} 的区别只有一处：**输入面的构造方式**。
+     * overlay 用 {@code ST_Buffer(圆心, radius)} 画的是直线圆；
+     * 这里用 {@code isochroneGeom} 得到沿路网走出来的面。
+     * 求交、按重叠度分组、数设施，全部复用同一条 overlay SQL —— 不复制那 200 行。
+     *
+     * <p>★ 为什么在 service 里循环而不是写一条巨型 SQL：
+     * 每个圆都要跑一次 Dijkstra + 建缓冲，SQL 里用 LATERAL 串起来会变成
+     * 五层嵌套、几乎无法调试；循环 2–6 次，代价是 N 次往返（每个 1–3 秒），
+     * 换来的是「每个圆的几何都能单独返回给前端画」。
+     *
+     * <p>返回在原 overlay 结果上追加：
+     * <pre>
+     *   surfaces: [{ id, name, areaKm2, snapM, usedBudgetM, edgeCount,
+     *                surface(GeoJSON), skeleton(GeoJSON) }]
+     * </pre>
+     * 前端据此把「每个圈的可达面 + 路网」一起画出来。
+     */
+    public JsonNode overlayNetwork(List<OverlayReq.Shape> shapes, boolean withItems) {
+        // ① 校验：这里只接受圆（叠加的输入就是一个个点）
+        if (shapes == null || shapes.size() < MIN_SHAPES) {
+            throw badRequest("at least " + MIN_SHAPES + " circles are required");
+        }
+        if (shapes.size() > MAX_SHAPES) {
+            throw badRequest("at most " + MAX_SHAPES + " circles are allowed, got " + shapes.size());
+        }
+        for (int i = 0; i < shapes.size(); i++) {
+            OverlayReq.Shape s = shapes.get(i);
+            String tag = "shapes[" + i + "]";
+            if (s == null) throw badRequest(tag + " must not be null");
+            if (s.lon() == null || s.lat() == null || s.radius() == null) {
+                throw badRequest(tag + ": circle needs lon / lat / radius");
+            }
+            if (s.lon() < -180 || s.lon() > 180) {
+                throw badRequest(tag + ".lon must be in [-180, 180], got " + s.lon());
+            }
+            if (s.lat() < -90 || s.lat() > 90) {
+                throw badRequest(tag + ".lat must be in [-90, 90], got " + s.lat());
+            }
+            if (s.radius() <= MIN_RADIUS_M || s.radius() > MAX_RADIUS_M) {
+                throw badRequest(tag + ".radius must be in (" + (int) MIN_RADIUS_M
+                        + ", " + (int) MAX_RADIUS_M + "], got " + s.radius());
+            }
+        }
+
+        // ② 每个圆 → 可达面（WKT 给细分用，GeoJSON 给前端画）
+        JsonNode surfaces = objectMapper.createArrayNode();
+        List<Map<String, Object>> areaShapes = new java.util.ArrayList<>();
+
+        for (OverlayReq.Shape s : shapes) {
+            String raw;
+            try {
+                raw = poiMapper.isochroneGeom(s.lon(), s.lat(), s.radius());
+            } catch (Exception e) {
+                throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR,
+                        "isochrone failed for shape " + s.id() + ": " + rootMessage(e), e);
+            }
+            JsonNode geom;
+            try {
+                geom = objectMapper.readTree(raw);
+            } catch (JsonProcessingException e) {
+                throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR,
+                        "cannot parse isochrone for shape " + s.id(), e);
+            }
+
+            // status=no_network（最近路网比预算还远）：这个圆没有面可叠，跳过。
+            // ★ 不报 400：用户画 3 个圈、其中 1 个在山里，不该让整批失败。
+            if (geom == null || !"ok".equals(geom.path("status").asText())) {
+                continue;
+            }
+            String wkt = geom.path("surfaceWkt").asText("");
+            if (wkt.isBlank()) continue;
+
+            /**
+             * ★ 不要写成一串 .put().set() 链：ObjectNode.set() 的返回类型是泛型 T
+             *   （<T extends JsonNode> T set(String, JsonNode)），链式调用时
+             *   javac 推不出 T，会把静态类型退化成 JsonNode，
+             *   而后面的 .set(...) 就报「找不到符号」。
+             *   拆成显式变量，类型稳定。
+             */
+            com.fasterxml.jackson.databind.node.ObjectNode one = objectMapper.createObjectNode();
+            one.put("id", s.id());
+            one.put("name", s.name());
+            one.put("areaKm2", geom.path("areaKm2").asDouble(0));
+            one.put("snapM", geom.path("snapM").asInt(0));
+            one.put("usedBudgetM", geom.path("usedBudgetM").asInt(0));
+            one.put("edgeCount", geom.path("edgeCount").asInt(0));
+            one.set("surface", geom.path("surface"));
+            one.set("skeleton", geom.path("skeleton"));
+            ((com.fasterxml.jackson.databind.node.ArrayNode) surfaces).add(one);
+
+            areaShapes.add(Map.of(
+                    "id", s.id(),
+                    "name", s.name() == null ? s.id() : s.name(),
+                    "kind", "area",
+                    "wkt", wkt));
+        }
+
+        if (areaShapes.size() < MIN_SHAPES) {
+            throw badRequest("fewer than " + MIN_SHAPES
+                    + " circles have a reachable network (nearest road may be farther than the budget)");
+        }
+
+        // ③ 交给既有细分 SQL：它不关心面是圆还是等时圈，只认 WKT
+        String shapesJson;
+        try {
+            shapesJson = objectMapper.writeValueAsString(areaShapes);
+        } catch (JsonProcessingException e) {
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR,
+                    "cannot encode isochrone shapes", e);
+        }
+
+        String baseRaw = poiMapper.overlay(shapesJson, withItems, MAX_ITEM_LIMIT);
+        if (baseRaw == null) {
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR,
+                    "overlay query returned nothing");
+        }
+
+        // ④ 在原结果上追加 surfaces（前端靠它画「每个圈的可达面 + 路网」）
+        try {
+            JsonNode base = objectMapper.readTree(baseRaw);
+            ((com.fasterxml.jackson.databind.node.ObjectNode) base).set("surfaces", surfaces);
+            return base;
+        } catch (JsonProcessingException e) {
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR,
+                    "cannot parse overlay result", e);
+        }
+    }
+
+    // ══════════════════════════════════════════════════════════
     //  路网等时圈（/api/poi/isochrone）
     // ══════════════════════════════════════════════════════════
 
