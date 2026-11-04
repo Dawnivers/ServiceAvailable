@@ -258,6 +258,59 @@ public class PoiService {
         return new ResponseStatusException(HttpStatus.BAD_REQUEST, msg);
     }
 
+    // ══════════════════════════════════════════════════════════
+    //  路网等时圈（/api/poi/isochrone）
+    // ══════════════════════════════════════════════════════════
+
+    /**
+     * 从点击点沿步行路网走 budget 米能到的地方：可达面 + 可达路网 + 面内设施。
+     *
+     * <p>与 /nearby 的关系：同一个「从我的位置出发 800 米」的问题，两种口径——
+     * nearby 算直线（ST_DWithin），这里算路网（pgr_drivingDistance）。
+     * 两个数字放在一张卡里对比，就是这个接口存在的理由。
+     *
+     * <p>★ 校验只做「参数合法性」，不做「几何有效性」：
+     * 吸附到最近路网节点、扣掉吸附距离、半截边补齐，全部在 SQL 里完成。
+     * 这样接口层薄、规则只有一处。
+     */
+    public JsonNode isochrone(double lon, double lat, double budget, int limit) {
+        if (lon < -180 || lon > 180) {
+            throw badRequest("lon must be in [-180, 180], got " + lon);
+        }
+        if (lat < -90 || lat > 90) {
+            throw badRequest("lat must be in [-90, 90], got " + lat);
+        }
+        // 预算区间与前端滑杆一致（analysis.js 的 RADIUS: 100–2000）
+        if (budget <= 50 || budget > 2000) {
+            throw badRequest("budget must be in (50, 2000], got " + budget);
+        }
+        if (limit <= 0 || limit > 200) {
+            throw badRequest("limit must be in (0, 200], got " + limit);
+        }
+
+        String raw;
+        try {
+            raw = poiMapper.isochrone(lon, lat, budget, limit);
+        } catch (Exception e) {
+            // 路网表没导入 / pgRouting 没装，都会落到这里。把真话带出去，
+            // 前端 SqlHintBar 才有东西可显示（与 within 的 rootMessage 同一手法）。
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR,
+                    "isochrone query failed: " + rootMessage(e), e);
+        }
+
+        if (raw == null || raw.isBlank()) {
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR,
+                    "isochrone query returned nothing");
+        }
+
+        try {
+            return objectMapper.readTree(raw);
+        } catch (JsonProcessingException e) {
+            throw new ResponseStatusException(HttpStatus.INTERNAL_SERVER_ERROR,
+                    "cannot parse isochrone result", e);
+        }
+    }
+
     /** 保留 2 位小数。用 BigDecimal，别用 double 直接四舍五入 */
     private static Double round2(double v) {
         return BigDecimal.valueOf(v).setScale(2, RoundingMode.HALF_UP).doubleValue();

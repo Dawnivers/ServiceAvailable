@@ -4,6 +4,7 @@ import TopBar from './components/TopBar.vue';
 import LayerPanel from './components/LayerPanel.vue';
 import AnalysisToolbar from './components/AnalysisToolbar.vue';
 import AnalysisResult from './components/AnalysisResult.vue';
+import ReachPanel from './components/ReachPanel.vue';
 import OverlayPanel from './components/OverlayPanel.vue';
 import SqlHintBar from './components/SqlHintBar.vue';
 import PoiDetailCard from './components/PoiDetailCard.vue';
@@ -17,6 +18,8 @@ import { useGridStore } from './stores/grid.js';
 import {
   useAnalysisStore,
   TOOLS,
+  TOOLS_BASE,
+  TOOLS_OVERLAY,
   CATEGORIES,
   RADIUS,
   MAX_SHAPES,
@@ -161,9 +164,19 @@ const sqlHint = computed(() => {
   }
 
   if (analysis.tool === 'point') {
+    /**
+     * 点选模式现在是**两套口径同时跑**：
+     *   直线  ST_DWithin（/api/poi/nearby）
+     *   路网  pgr_drivingDistance（/api/poi/isochrone）
+     * 横幅必须两个都写，否则下面显示的「耗时 / 返回条数」只对应其中一个，
+     * 看着像数字对不上（这正是 D13 时踩过的坑：横幅与面板必须同源）。
+     */
+    const iso = analysis.isochrone;
+    const used = iso?.usedBudgetM;
+    const net = used != null ? ` + pgr_drivingDistance(${Math.round(used)} m)` : ' + pgr_drivingDistance';
     return {
       fn: 'ST_DWithin',
-      args: `(geom::geography, 圆心, ${analysis.radius})`,
+      args: `(geom::geography, 圆心, ${analysis.radius})${net}`,
     }
   }
 
@@ -272,6 +285,65 @@ const onExportCsv = () => {
   rows.push(csvLine([`注：设施清单为接口返回的前 ${r.items.length} 条，非全量`]))
 
   downloadCsv(rows, `可达性分析_${stamp()}.csv`)
+}
+
+/**
+ * 导出「路网可达」这一份。
+ *
+ * ★ 为什么不并进上面那份导出一个文件：
+ *   两份的**口径不同**（直线 vs 路网），合并会让"设施总数 76"和"18"
+ *   挤在同一列里，拿到 CSV 的人分不清哪个是哪个。
+ *   分开导出、文件名带口径，是最不容易误读的做法。
+ *
+ * ★ 前三行是**口径说明**而不是装饰：
+ *   起点偏移 191 m、实际路网预算 609 m —— 没有这两行，
+ *   别人看到"800 m 只到了 0.46 km²"会以为算错了。
+ */
+const onExportIsochroneCsv = () => {
+  const r = analysis.displayIsochrone
+  if (!r || r.status !== 'ok') return
+
+  const c = analysis.center
+  // 经纬度只留 6 位（约 0.1 m）：原始 double 会印出 114.02675800323485 这种一长串，
+  // 拿到 CSV 的人既看不清也不需要那个精度
+  const lon6 = c?.lon != null ? Number(c.lon).toFixed(6) : ''
+  const lat6 = c?.lat != null ? Number(c.lat).toFixed(6) : ''
+  const rows = []
+  rows.push(csvLine(['可达性分析结果（路网口径）', stamp()]))
+  rows.push(csvLine(['点击点经度', lon6, '点击点纬度', lat6]))
+  rows.push(csvLine(['预算(m)', analysis.radius]))
+  rows.push(csvLine(['起点偏移(m)', r.snapM ?? '', '实际路网预算(m)', r.usedBudgetM ?? '']))
+  rows.push(csvLine(['可达面积(km²)', r.areaKm2?.toFixed(3) ?? '',
+                     '直线口径面积(km²)', r.circleAreaKm2?.toFixed(3) ?? '']))
+  rows.push(csvLine(['可达设施数', r.count,
+                     '直线口径设施数', r.circleCount ?? '']))
+  rows.push(csvLine(['可达路网', `${r.edgeCount ?? 0} 段`,
+                     `半截边 ${r.partialCount ?? 0} 段`,
+                     `合计 ${r.walkKm ?? 0} km`]))
+  rows.push('')
+
+  rows.push(csvLine(['类别', '数量', '占比']))
+  const catEntries = Object.entries(r.byCategory)
+  const pcts = splitPercent(catEntries.map(([, n]) => n), 1)
+  catEntries.forEach(([key, n], i) => {
+    const label = CATEGORIES.find((x) => x.key === key)?.label ?? key
+    rows.push(csvLine([label, n, `${pcts[i].toFixed(1)}%`]))
+  })
+  rows.push('')
+
+  rows.push(csvLine(['序号', 'gid', '名称', '类别', '经度', '纬度']))
+  r.items.forEach((it, i) => {
+    const label = CATEGORIES.find((x) => x.key === it.category)?.label ?? it.category
+    rows.push(csvLine([i + 1, it.gid ?? '', it.name, label, it.lon ?? '', it.lat ?? '']))
+  })
+  rows.push('')
+  // ★ 如实写清"非全量"：接口的 items 受 limit 限制（默认 50），
+  //   而统计里的 count 是全量 —— 两者可能不等，不说明就是骗人。
+  rows.push(csvLine([
+    `注：设施清单为接口返回的前 ${r.items.length} 条（可达总数 ${r.itemsTotal ?? r.count}），非全量`,
+  ]))
+
+  downloadCsv(rows, `可达性分析_路网口径_${stamp()}.csv`)
 }
 
 /** 叠加导出进行中：要额外拉一次明细，按钮得有个"正在取数据"的态 */
@@ -423,6 +495,17 @@ const onExportOverlayCsv = async () => {
 
 // ── 分析工具面板的数据桥（面板是纯展示组件，状态都在 store）────
 const onToolChange = (t) => analysis.setTool(t)
+
+/**
+ * 工具栏显示哪些工具。
+ *
+ * ★ 2026-11-04 起分组：普通分析模式只有「点选 / 测距」——
+ *   矩形和自由绘制回答的是「这块地里有什么」，不属于「从这里能走到哪」，
+ *   混在一起会让用户以为画个框也能算可达性。
+ * ★ 叠加模式反过来：它必须能连续画面（2–6 个求交），画圆没有意义，
+ *   所以那一组是「框选 / 自由绘制」。
+ */
+const toolList = computed(() => (analysis.overlay ? TOOLS_OVERLAY : TOOLS_BASE))
 const onRadiusChange = (v) => analysis.setRadius(v)
 const onCategoryToggle = (k) => analysis.toggleCategory(k)
 
@@ -489,9 +572,13 @@ const activeShapeLabel = computed(() => {
  * 图例该显示哪一套。
  * ★ 叠加模式优先：此时地图上真正需要解码的是"这块颜色深到几重"，
  *   而不是 POI 的四个类别色（分析模式下 POI 层虽然亮着，但它是背景）。
+ * ★ 点选模式优先于热力图：此时图上多了三层（圆/面/路网），
+ *   如果不切图例，左下角还在解释"学校蓝、医院红"，而用户真正想问的是
+ *   "蓝面是什么、红虚线是什么"。
  */
 const legendMode = computed(() => {
   if (analysis.active && analysis.overlay) return 'degree'
+  if (analysis.active && analysis.tool === 'point') return 'isochrone'
   return store.visible.heat ? 'heat' : 'poi'
 })
 
@@ -558,7 +645,7 @@ const onOptionPick = (id, key) => {
     :tool="analysis.tool"
     :radius="analysis.radius"
     :categories="analysis.categories"
-    :tools="TOOLS"
+    :tools="toolList"
     :category-list="CATEGORIES"
     :radius-range="RADIUS"
     :center="analysis.center"
@@ -597,14 +684,25 @@ const onOptionPick = (id, key) => {
     @export="onExportOverlayCsv"
     @load-items="onLoadOverlayItems"
   />
-  <AnalysisResult
-    v-else-if="analysis.active"
-    :result="analysis.displayResult"
-    :loading="analysis.resultLoading"
-    :error="analysis.resultError"
-    @export="onExportCsv"
-    @pick="onPickResult"
-  />
+  <!-- 非叠加模式：两张卡上下堆叠 —— 上面直线口径，下面路网口径。
+       ★ 为什么不并排：288 × 2 + 间距 = 600px，会压掉近一半地图视野；
+         竖向堆叠时地图宽度不受影响，对比关系也更强（同一列、同一预算）。 -->
+  <div v-if="analysis.active && !analysis.overlay" class="right-stack">
+    <AnalysisResult
+      :result="analysis.displayResult"
+      :loading="analysis.resultLoading"
+      :error="analysis.resultError"
+      @export="onExportCsv"
+      @pick="onPickResult"
+    />
+    <ReachPanel
+      :result="analysis.displayIsochrone"
+      :loading="analysis.isochroneLoading"
+      :error="analysis.isochroneError"
+      @pick="onPickResult"
+      @export="onExportIsochroneCsv"
+    />
+  </div>
 
   <!-- 右上：POI 详情卡 -->
   <PoiDetailCard
@@ -665,4 +763,39 @@ const onOptionPick = (id, key) => {
   <MapScaleReadout :map="mapRef" />
 </template>
 
-<style scoped></style>
+<style scoped>
+/**
+ * 右侧两张结果卡的堆叠容器。
+ *
+ * ★ AnalysisResult 自己的样式是 position:absolute; right:16px; top:72px。
+ *   放进容器后必须改成 static，否则它会「相对容器再偏移 16/72」——
+ *   表现是第二张卡跑到屏幕中间去。
+ *   用 :deep() 覆盖子组件内部类，不修改 AnalysisResult 本身。
+ */
+.right-stack {
+  position: absolute;
+  right: 16px;
+  top: 72px;
+  z-index: 15;
+  width: 288px;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  /* 两张卡加起来可能超高：给个上限，超出滚动，别顶到屏幕外 */
+  max-height: calc(100vh - 72px - 56px);
+  overflow-y: auto;
+  overflow-x: hidden;
+  /* 容器本身不吃鼠标事件，只有卡片吃 —— 否则地图在这块区域拖不动 */
+  pointer-events: none;
+  scrollbar-width: thin;
+}
+.right-stack > * {
+  pointer-events: auto;
+}
+.right-stack :deep(.result-card) {
+  position: static;
+  right: auto;
+  top: auto;
+  width: 100%;
+}
+</style>

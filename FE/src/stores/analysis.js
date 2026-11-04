@@ -36,6 +36,28 @@ export const TOOLS = [
   { key: 'measure', label: '测距' },
 ];
 
+/**
+ * 工具分组（2026-11-04 起）。
+ *
+ * ★ 为什么分组：矩形 / 自由绘制是「圈一块地」的画法，
+ *   它们回答的是「这块地里有什么」，和「从这里能走到哪」是两种问题。
+ *   可达性分析只认一个起点（点选），所以**非叠加模式下不再暴露这两个工具**。
+ *
+ * ★ 但叠加分析离不开它们：叠加就是「连续画 2–6 个面相求交」，
+ *   只允许画圆的话叠加就退化成同心圆，没有意义。
+ *   所以它们在**叠加模式下仍然可用**，只是不出现在普通分析模式的工具栏里。
+ *
+ * 校验白名单仍然用合并后的 TOOLS —— 程序调用/快捷键传进来时依旧合法。
+ */
+export const TOOLS_BASE = [
+  { key: 'point', label: '点选' },
+  { key: 'measure', label: '测距' },
+];
+export const TOOLS_OVERLAY = [
+  { key: 'rect', label: '框选' },
+  { key: 'freehand', label: '自由绘制' },
+];
+
 /** 参与统计的类别。key 必须和后端 category 字段一致 */
 export const CATEGORIES = [
   { key: 'school', label: '学校', color: '#1565C0' },
@@ -98,6 +120,15 @@ export const useAnalysisStore = defineStore('analysis', {
     resultLoading: false,
     resultError: null,
     resultMs: null, // 这次请求的实际耗时（毫秒），底部 SQL 提示条用
+
+    // ── 路网等时圈（可达性分析的主角，2026-11-04 加）──────────
+    // ★ 和 result 是**两条腿**：result 是直线口径（/nearby），
+    //   isochrone 是路网口径（/isochrone）。两个都留着才能做对比。
+    // ★ 只在点选模式下请求；矩形/自由绘制不再属于可达性分析。
+    isochrone: null, // /api/poi/isochrone 原始结果
+    isochroneLoading: false,
+    isochroneError: null,
+    isochroneMs: null,
 
     // ── 叠加分析 ─────────────────────────────────────────────
     overlay: false, // 开关：开着时绘制「累积不清场」
@@ -202,6 +233,67 @@ export const useAnalysisStore = defineStore('analysis', {
             }
           : { id: x.id, name: x.label, kind: 'area', wkt: x.wkt },
       ),
+
+    /**
+     * 「真实可达」面板要渲染的数据（与 displayResult 同一套类别过滤逻辑）。
+     *
+     * ★ 为什么单独一个 getter 而不是复用 displayResult：
+     *   两者口径不同 —— displayResult 是「直线圆内」，这里是「路网可达」。
+     *   硬塞进一个 getter 会出现"面板切换时数字跳变但标签没变"的错位。
+     *
+     * ★ circleCount / circleAreaKm2 是**对照值**，取自直线口径的结果：
+     *   - circleCount 来自 /nearby 的 count（已按类别过滤）
+     *   - circleAreaKm2 用 πr² 直接算，不再开接口
+     *   有了这两个，面板才能说「面积只剩 54%，设施还有 96%」。
+     */
+    displayIsochrone: (s) => {
+      const r = s.isochrone;
+      if (!r) return null;
+
+      // 非 ok 状态（最近路网比预算还远）：只回状态，不给数字
+      if (r.status !== 'ok') {
+        return {
+          status: r.status,
+          snapM: r.snapM ?? null,
+          usedBudgetM: r.usedBudgetM ?? 0,
+          count: 0,
+          byCategory: {},
+          items: [],
+        };
+      }
+
+      const byCategory = {};
+      let count = 0;
+      for (const c of CATEGORIES) {
+        if (!s.categories[c.key]) continue;
+        const n = Number(r.byCategory?.[c.key] ?? 0);
+        byCategory[c.key] = n;
+        count += n;
+      }
+
+      const items = (r.items ?? []).filter((x) => s.categories[x.category]);
+
+      // 直线口径的圆面积：π r²（r 用当前半径，单位米 → km²）
+      const rM = Number(s.radius ?? 800);
+      const circleAreaKm2 = (Math.PI * rM * rM) / 1e6;
+
+      return {
+        status: 'ok',
+        count,
+        byCategory,
+        items,
+        itemsTotal: r.itemsTotal ?? items.length,
+        areaKm2: r.areaKm2 ?? null,
+        snapM: r.snapM ?? null,
+        usedBudgetM: r.usedBudgetM ?? null,
+        edgeCount: r.edgeCount ?? null,
+        partialCount: r.partialCount ?? null,
+        walkKm: r.walkKm ?? null,
+        // ── 对照：直线口径 ───────────────────────────────
+        circleCount: s.displayResult?.count ?? null,
+        circleAreaKm2,
+      };
+    },
   },
 
   actions: {
@@ -216,6 +308,7 @@ export const useAnalysisStore = defineStore('analysis', {
       this.geometry = null;
       this.measure = null;
       this.result = null; // 上一轮的结果作废
+      this.clearIsochrone(); // 路网等时圈同样作废（否则会带着上次的面进来）
       this.resetOverlay();
     },
 
@@ -230,6 +323,15 @@ export const useAnalysisStore = defineStore('analysis', {
       this.resultError = null;
       this.resultLoading = false;
       this.resultMs = null;
+      this.clearIsochrone();
+      /**
+       * ★ 2026-11-04 修：退出时必须把叠加开关也关掉。
+       *   原来只调 resetOverlay()（它清面、清结果，但**不动 overlay 这个布尔值**），
+       *   于是「退出 → 再进分析」会直接落在叠加模式里：
+       *   工具栏显示的是框选/自由绘制、点一下地图却画不出点选的圆，
+       *   实测就是这样多出一个 A·缓冲区 800 m 的面。
+       */
+      this.overlay = false;
       this.resetOverlay();
       // radius / categories 保留用户上次的选择，不重置——
       // 这是「偏好」不是「临时状态」，重置反而让人骂娘
@@ -263,6 +365,9 @@ export const useAnalysisStore = defineStore('analysis', {
 
     setCenter(center) {
       this.center = center;
+      // ★ 起点变了，上一张等时圈就无效了 —— 必须在这里清，
+      //   否则新请求回来之前，图上会挂着「以旧点为圆心」的面，看着像算错了。
+      this.clearIsochrone();
     },
 
     clearCenter() {
@@ -276,6 +381,8 @@ export const useAnalysisStore = defineStore('analysis', {
       // 画了多边形就不再走"圆心 + 半径"那条路，两者互斥
       this.center = null;
       this.result = null;
+      // 等时圈只认"一个起点"，多边形没有起点可言 → 一起清掉
+      this.clearIsochrone();
     },
 
     /** 测距结果（米） */
@@ -303,6 +410,31 @@ export const useAnalysisStore = defineStore('analysis', {
       this.resultError = null;
       this.resultLoading = false;
       this.resultMs = null;
+    },
+
+    // ── 路网等时圈 ───────────────────────────────────────────
+    setIsochrone(data, ms = null) {
+      this.isochrone = data;
+      this.isochroneError = null;
+      this.isochroneMs = ms;
+      this.isochroneLoading = false;
+    },
+
+    setIsochroneLoading(v) {
+      this.isochroneLoading = !!v;
+    },
+
+    setIsochroneError(msg) {
+      this.isochroneError = msg;
+      this.isochrone = null;
+      this.isochroneLoading = false;
+    },
+
+    clearIsochrone() {
+      this.isochrone = null;
+      this.isochroneError = null;
+      this.isochroneLoading = false;
+      this.isochroneMs = null;
     },
 
     /**
@@ -360,8 +492,17 @@ export const useAnalysisStore = defineStore('analysis', {
         this.result = null;
         this.resultError = null;
         this.resultMs = null;
+        this.clearIsochrone(); // 叠加模式不做等时圈
         // 测距不出统计，叠加入口不能停在它上面
         if (this.tool === 'measure') this.tool = 'rect';
+      } else {
+        /**
+         * ★ 2026-11-04：关掉叠加时要检查「当前工具是否还在可用列表里」。
+         *   叠加模式用的是 rect / freehand，而普通分析模式只暴露 point / measure。
+         *   不收回的话，工具栏上会出现「一个都没选中」的状态，
+         *   而且 drawing 里还挂着一个用户看不见按钮的矩形交互 —— 点地图就画框，莫名奇妙。
+         */
+        if (!TOOLS_BASE.some((t) => t.key === this.tool)) this.tool = 'point';
       }
     },
 

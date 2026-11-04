@@ -234,6 +234,40 @@ export function createDrawingController(map) {
   });
   map.addLayer(resultLayer);
 
+  /**
+   * 路网等时圈：两个图层（面 + 路网）。
+   *
+   * ★ 为什么单独两层而不是塞进上面的 source：
+   *   ① 两者来源不同（后端算的 vs 用户画的），清场时机也不同；
+   *   ② zIndex 要压在用户图形（100）之下、结果层（99）附近，
+   *      塞进 source 就没法单独控制层级。
+   *
+   * zIndex 96 = 面（最底），97 = 路网（线压面之上、用户图形之下）。
+   * ★ 面在下面：否则 50 m 缓冲的半透明面会把细线糊掉。
+   */
+  const surfaceSource = new VectorSource();
+  const surfaceLayer = new VectorLayer({
+    source: surfaceSource,
+    zIndex: 96,
+    style: new Style({
+      fill: new Fill({ color: 'rgba(21, 101, 192, 0.12)' }),
+      stroke: new Stroke({ color: 'rgba(21, 101, 192, 0.9)', width: 2 }),
+    }),
+    updateWhileInteracting: false,
+  });
+  map.addLayer(surfaceLayer);
+
+  const networkSource = new VectorSource();
+  const networkLayer = new VectorLayer({
+    source: networkSource,
+    zIndex: 97,
+    style: new Style({
+      stroke: new Stroke({ color: 'rgba(21, 101, 192, 0.75)', width: 1 }),
+    }),
+    updateWhileInteracting: false,
+  });
+  map.addLayer(networkLayer);
+
   // ── 内部状态 ──────────────────────────────────────────────
   let draw = null; // 当前挂着的 Draw 交互（同一时刻只能有一个）
   let tool = null;
@@ -284,6 +318,10 @@ export function createDrawingController(map) {
     source.clear();
     shapeFeatures.clear();
     activeCircleId = null;
+    // ★ 等时圈的两个图层也必须清 —— 它们不在 source 里，
+    //   漏了这行就会出现「退出分析模式后面和路网还挂在图上」。
+    surfaceSource.clear();
+    networkSource.clear();
   }
 
   /** 按 kind 删掉指定图形（圆和圆心会随半径变化重建） */
@@ -444,6 +482,44 @@ export function createDrawingController(map) {
 
   function clearOverlayResult() {
     resultSource.clear();
+  }
+
+  /**
+   * 路网等时圈：把后端算的「可达面 + 可达路网」画上去。
+   *
+   * @param {object|null} data /api/poi/isochrone 的响应
+   *   { status, surface(GeoJSON Polygon/MultiPolygon), skeleton(GeoJSON MultiLineString), ... }
+   *
+   * ★ 几何是 4326（ST_AsGeoJSON 只输出 WGS84），必须转 3857 —— 和 setOverlayResult 一致。
+   *   注意与悬停高亮相反：那边 GetFeatureInfo 的几何跟着请求 SRS 走，不能再转。
+   * ★ status !== 'ok' 时（最近路网比预算还远）只清场、不画 —— 空几何画不出东西。
+   */
+  function setIsochrone(data) {
+    surfaceSource.clear();
+    networkSource.clear();
+    if (!data || data.status !== 'ok') return;
+
+    const fmt = new GeoJSON();
+    const opts = {
+      dataProjection: 'EPSG:4326',
+      featureProjection: proj(),
+    };
+
+    if (data.surface) {
+      surfaceSource.addFeatures(
+        fmt.readFeatures({ type: 'Feature', properties: {}, geometry: data.surface }, opts),
+      );
+    }
+    if (data.skeleton) {
+      networkSource.addFeatures(
+        fmt.readFeatures({ type: 'Feature', properties: {}, geometry: data.skeleton }, opts),
+      );
+    }
+  }
+
+  function clearIsochrone() {
+    surfaceSource.clear();
+    networkSource.clear();
   }
 
   /** 开关叠加模式。关掉时把面与结果一起收干净 */
@@ -673,8 +749,12 @@ export function createDrawingController(map) {
     removeDraw();
     map.removeLayer(layer);
     map.removeLayer(resultLayer);
+    map.removeLayer(surfaceLayer);
+    map.removeLayer(networkLayer);
     source.clear();
     resultSource.clear();
+    surfaceSource.clear();
+    networkSource.clear();
     shapeFeatures.clear();
     activeCircleId = null;
   }
@@ -697,6 +777,10 @@ export function createDrawingController(map) {
     focusShape,
     setOverlayResult,
     clearOverlayResult,
+
+    // ── 路网等时圈 ──
+    setIsochrone,
+    clearIsochrone,
 
     // 只读一下当前状态，方便调试
     get tool() {

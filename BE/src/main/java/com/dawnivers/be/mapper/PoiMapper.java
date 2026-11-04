@@ -54,4 +54,30 @@ public interface PoiMapper {
     String overlay(@Param("shapesJson") String shapesJson,
                    @Param("withItems") boolean withItems,
                    @Param("itemLimit") int itemLimit);
+
+    // ── 服务于 /api/poi/isochrone（路网等时圈）──────────────────────
+    /**
+     * 从点击点出发、按路网走 budget 米能到的地方。
+     *
+     * 返回一段 JSON 字符串：
+     * <pre>
+     *   status / nodeId / snapM / usedBudgetM
+     *   areaKm2 / surface(GeoJSON) / skeleton(GeoJSON)
+     *   edgeCount / partialCount / walkKm
+     *   count / itemsTotal / byCategory / items[]
+     * </pre>
+     *
+     * ★ 返回 String 而不是 DTO：里面有「面」「路网」「设施列表」三块结构
+     *   完全不同的数据，SQL 里 json_build_object 一次拼好最省事，
+     *   readTree 放在 service（与 overlay 同一手法）。
+     *
+     * @param lon    点击点经度
+     * @param lat    点击点纬度
+     * @param budget 预算（米）。SQL 里会扣掉吸附距离，实际扩散用 budget - snap
+     * @param limit  设施列表条数上限（统计不受它影响）
+     */
+    String isochrone(@Param("lon") double lon,
+                     @Param("lat") double lat,
+                     @Param("budget") double budget,
+                     @Param("limit") int limit);
 }

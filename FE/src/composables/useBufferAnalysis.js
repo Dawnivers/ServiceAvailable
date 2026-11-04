@@ -147,7 +147,13 @@ export function useBufferAnalysis() {
       if (mySeq !== seq) return;
 
       if (isOverlay) analysis.setOverlayResult(data, elapsed);
-      else analysis.setResult(data, elapsed);
+      else {
+        analysis.setResult(data, elapsed);
+        // ★ 点选模式：直线口径先出数字（约 20 ms），再串行拉路网等时圈（2–3 s）。
+        //   不并发的原因：并发的慢请求会把面板整体拖进"加载中"，
+        //   用户要干等 3 秒才看到任何数字；串行是数字立刻出现、面随后补上。
+        if (key.startsWith('nearby')) fetchIsochrone(mySeq);
+      }
     } catch (e) {
       if (mySeq !== seq) return;
       fail('网络异常，请稍后重试');
@@ -160,9 +166,66 @@ export function useBufferAnalysis() {
     }
   }
 
+  /**
+   * 路网等时圈 —— 点选模式专用，跟在 /nearby 之后串行发。
+   *
+   * 与 nearby 的关系：同一个「从我的位置出发 800 米」，
+   *   nearby   = 直线（ST_DWithin）
+   *   isochrone = 路网（pgr_drivingDistance）
+   * 两个数字都要，面板才能做「面积只剩 54%、设施还有 96%」的对比。
+   *
+   * ★ 三个必须守住的点：
+   *   ① 用同一个 mySeq 判竞态：用户换点后旧结果必须丢弃，
+   *      否则"慢请求回来把新点的面覆盖成旧点的面"——这类 bug 极难复现。
+   *   ② 失败不清 result：直线口径的数字是好的，不该被路网失败连累。
+   *   ③ 请求超时会长（2–3 s），loading 单独一个状态位，不阻塞数字展示。
+   */
+  async function fetchIsochrone(mySeq) {
+    const c = analysis.center;
+    if (!c) return;
+
+    analysis.setIsochroneLoading(true);
+    const t0 = performance.now();
+
+    try {
+      const qs = new URLSearchParams({
+        lon: String(c.lon),
+        lat: String(c.lat),
+        budget: String(analysis.radius),
+        limit: '50',
+      });
+
+      const res = await fetch(`/api/poi/isochrone?${qs}`);
+      const ms = Math.round(performance.now() - t0);
+      if (mySeq !== seq) return; // 过期，丢弃
+
+      if (!res.ok) {
+        let msg = `服务异常（${res.status}）`;
+        try {
+          const body = await res.json();
+          // Spring Boot 3 的 ResponseStatusException → ProblemDetail，真话在 detail
+          msg = body?.detail ?? body?.message ?? msg;
+        } catch {
+          /* 非 JSON 错误体，保留默认文案 */
+        }
+        analysis.setIsochroneError(msg);
+        return;
+      }
+
+      const data = await res.json();
+      if (mySeq !== seq) return;
+      analysis.setIsochrone(data, ms);
+    } catch (e) {
+      if (mySeq !== seq) return;
+      analysis.setIsochroneError('路网可达计算失败');
+      console.warn('[isochrone]', e);
+    } finally {
+      if (mySeq === seq) analysis.setIsochroneLoading(false);
+    }
+  }
+
   /** 按当前状态决定要不要重查 */
-  function sync() {
-    cancelPending();
+  function sync() {    cancelPending();
 
     const key = requestKey();
     if (!key) {
@@ -170,6 +233,8 @@ export function useBufferAnalysis() {
       lastKey = null;
       analysis.clearResult();
       analysis.clearOverlayResult();
+      // ★ 等时圈也要清：否则退出/切到测距后，地图上还挂着上一次的面和路网
+      analysis.clearIsochrone();
       return;
     }
 

@@ -426,4 +426,153 @@ SELECT json_build_object(
 );
 </select>
 
+<!-- ════════════════════════════════════════════════════════════════
+     等时圈：点 → 真实可达面 + 可达路网 + 面内设施
+
+     GET /api/poi/isochrone?lon&lat&budget&limit
+
+     ── 流水线（9 站）────────────────────────────────────────────
+       params  把经纬度 + 预算包成一行
+       snap    点 → 最近路网节点（两步排序：度数粗排 → 米数精排）
+       used    预算扣掉吸附距离（从"你的位置"算，不是从路口算）
+       dd      pgr_drivingDistance 在图上扩散，拿到走得到的边
+       partial 走不完的最后一条边用 ST_LineSubstring 切出半截
+       skel    全体线段 ST_LineMerge 焊成连续骨架
+       surf    骨架 ST_Buffer 50 m → 可达面
+       pois    ST_Within(poi, 面) → 全量（统计）+ 分页（列表）
+       拼 JSON
+
+     ── 四个已实测的坑，改这里必须知道 ──────────────────────────
+     ① cost 必须用 length_m（walk_ways.cost 单位是度，用它会走遍全图）
+     ② dd / skel / surf / pois_all 必须 MATERIALIZED：
+        被引用一次时 PG 会内联，进而"每读一行 poi 跑一遍 buffer"，
+        实测从 2.5 秒变成 120 秒以上挂住
+     ③ round(x, n) 里 x 是 double 会报"函数不存在"，必须 ::numeric
+     ④ pois_all 不要 LIMIT，统计和列表分两个 CTE，
+        否则 count 永远等于 limit（踩过）
+     ════════════════════════════════════════════════════════════════ -->
+<select id="isochrone" resultType="java.lang.String">
+    WITH params AS (
+        SELECT ST_SetSRID(ST_MakePoint(#{lon}, #{lat}), 4326) AS click,
+               #{budget}::numeric AS budget
+    ),
+
+    -- 最近路网节点。两步排序的原因：&lt;-&gt; 在 4326 下按"度"排，
+    -- 经度 1° ≈ 96 km、纬度 1° ≈ 111 km，两者不等价，边界处会选错。
+    snap AS MATERIALIZED (
+        SELECT c.node_id, c.snap_m
+        FROM (
+            SELECT v.id AS node_id,
+                   ST_Distance(v.geom::geography, p.click::geography) AS snap_m
+            FROM walk_ways_vertices_pgr v, params p
+            ORDER BY v.geom &lt;-&gt; p.click
+            LIMIT 5
+        ) c
+        ORDER BY c.snap_m
+        LIMIT 1
+    ),
+
+    -- 扣预算：人要先从自己的位置走到路上，剩下的才是路网上还能走多远。
+    -- GREATEST(...,0) 防负数：点在湖心时 800-1901 是负的，
+    -- 归零后 pgr_drivingDistance 只返回起点自身，被后面的 edge&lt;&gt;-1 过滤掉 → 自然空结果。
+    used AS MATERIALIZED (
+        SELECT s.node_id, s.snap_m, p.budget,
+               GREATEST(p.budget - s.snap_m, 0) AS used_budget
+        FROM snap s, params p
+    ),
+
+    -- 在图上扩散。第 1 参是"图的定义"（text，不能带占位符）：
+    --   id/source/target 是拓扑三列，cost 用 length_m（米）。
+    -- 第 4 参 false = 无向（步行双向）。
+    dd AS MATERIALIZED (
+        SELECT node, edge, agg_cost
+        FROM pgr_drivingDistance(
+            'SELECT id, source, target, length_m AS cost, length_m AS reverse_cost FROM walk_ways',
+            (SELECT node_id FROM used),
+            (SELECT used_budget FROM used),
+            false)
+        WHERE edge &lt;&gt; -1
+    ),
+
+    -- 半截边：预算耗尽时最后那条边只能走一部分。
+    -- 不补 → 面比真实可达范围小一圈（实测少 27% 面积、4.5 km 路）。
+    -- ★ ST_LineSubstring 第三参是**比例**不是米；切的方向必须跟着来路：
+    --   从 source 端走过来切 [0, frac]，从 target 端走过来切 [1-frac, 1]。
+    partial AS MATERIALIZED (
+        SELECT ST_LineSubstring(w.geom,
+            CASE WHEN w.source = d.node THEN 0
+                 ELSE 1 - LEAST(1, (u.used_budget - d.agg_cost) / NULLIF(w.length_m, 0)) END,
+            CASE WHEN w.source = d.node
+                 THEN LEAST(1, (u.used_budget - d.agg_cost) / NULLIF(w.length_m, 0))
+                 ELSE 1 END) AS geom
+        FROM dd d
+        JOIN walk_ways w ON (w.source = d.node OR w.target = d.node)
+        CROSS JOIN used u
+        WHERE u.used_budget &gt; 0
+          AND d.agg_cost + w.length_m &gt; u.used_budget
+          AND w.id NOT IN (SELECT edge FROM dd)
+    ),
+
+    -- 骨架：先 Collect 打包（快），再 LineMerge 焊成连续线（点数减半、体积省一半）
+    skel AS MATERIALIZED (
+        SELECT ST_LineMerge(ST_Collect(ARRAY[
+            (SELECT ST_Collect(w.geom) FROM dd JOIN walk_ways w ON w.id = dd.edge),
+            (SELECT ST_Collect(geom) FROM partial)
+        ])) AS g
+    ),
+
+    -- 面：::geography 让 50 是"地面米"（直接 buffer 会当成 50 度）；
+    -- 先 Simplify 再 buffer 实测省 30%；quad_segs=2 让顶点 999 → 421。
+    surf AS MATERIALIZED (
+        SELECT ST_MakeValid(
+            ST_Buffer(ST_Simplify(g, 0.00005)::geography, 50, 'quad_segs=2')::geometry
+        ) AS p
+        FROM skel
+    ),
+
+    -- 面内设施：全量（统计用）+ 分页（列表用）。
+    -- ★ 依赖 idx_poi_geom_gist（gist(poi.geom)）；没有它这一步从毫秒变分钟。
+    pois_all AS MATERIALIZED (
+        SELECT x.gid, x.name, x.category,
+               round(ST_X(x.geom)::numeric, 6) AS lon,
+               round(ST_Y(x.geom)::numeric, 6) AS lat
+        FROM poi x, surf
+        WHERE ST_Within(x.geom, surf.p)
+    ),
+    pois_page AS (
+        SELECT * FROM pois_all ORDER BY gid LIMIT #{limit}
+    )
+
+    SELECT json_build_object(
+        -- 状态：no_network = 最近路网比预算还远（不是"没找到"，是"太远"）
+        'status', CASE WHEN (SELECT used_budget FROM used) &lt;= 0
+                       THEN 'no_network' ELSE 'ok' END,
+
+        -- 透明度三件套：让前端能说清"这个圈以哪儿为圆心、预算剩多少"
+        'nodeId',       (SELECT node_id FROM used),
+        'snapM',        (SELECT round(snap_m) FROM used),
+        'usedBudgetM',  (SELECT round(used_budget) FROM used),
+
+        -- 结果
+        'areaKm2',      (SELECT round((ST_Area(p::geography) / 1e6)::numeric, 3) FROM surf),
+        'surface',      (SELECT ST_AsGeoJSON(ST_Simplify(p, 0.00002), 5)::json FROM surf),
+        'skeleton',     (SELECT ST_AsGeoJSON(ST_Simplify(g, 0.00002), 5)::json FROM skel),
+        'edgeCount',    (SELECT count(*) FROM dd),
+        'partialCount', (SELECT count(*) FROM partial),
+        'walkKm',       (SELECT round((sum(w.length_m) / 1000)::numeric, 2)
+                           FROM dd JOIN walk_ways w ON w.id = dd.edge),
+
+        -- 设施：count/byCategory 用全量，items 分页
+        'count',      (SELECT count(*) FROM pois_all),
+        'itemsTotal', (SELECT count(*) FROM pois_all),
+        'byCategory', (SELECT json_build_object(
+                           'school',   count(*) FILTER (WHERE category = 'school'),
+                           'hospital', count(*) FILTER (WHERE category = 'hospital'),
+                           'mall',     count(*) FILTER (WHERE category = 'mall'),
+                           'park',     count(*) FILTER (WHERE category = 'park'))
+                       FROM pois_all),
+        'items',      (SELECT coalesce(json_agg(pois_page), '[]'::json) FROM pois_page)
+    )::text
+</select>
+
 </mapper>

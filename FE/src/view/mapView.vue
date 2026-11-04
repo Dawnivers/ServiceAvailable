@@ -388,6 +388,21 @@ registerWatcher(
 );
 
 /**
+ * 路网等时圈 → 画「可达面 + 可达路网」。
+ *
+ * ★ 为什么放在 watcher 而不是请求回调里直接调 drawing：
+ *   全项目的「store 值 → OL 动作」都走这里，组件卸载时 stopAll() 才清得干净。
+ * ★ store 里 setCenter 会先 clearIsochrone()，所以换点时这里会收到 null
+ *   → 先清场，等慢请求（2–3 s）回来再画新的，中间不会闪旧面。
+ */
+registerWatcher(
+  'isochrone',
+  () => analysis.isochrone,
+  (data) => drawing?.setIsochrone(data ?? null),
+  { flush: 'post' },
+);
+
+/**
  * 点选后把镜头拉到「缓冲圈看得见」的级别。
  *
  * ★ 为什么必须有这一步：zoom 9 时分辨率约 305 m/px，

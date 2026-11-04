@@ -52,15 +52,33 @@ const props = defineProps({
 
 const isHeat = computed(() => props.mode === 'heat')
 const isDegree = computed(() => props.mode === 'degree')
+const isIsochrone = computed(() => props.mode === 'isochrone')
 
 const titleText = computed(() => {
+  if (isIsochrone.value) return '可达性分析'
   if (isDegree.value) return '重叠度'
   return isHeat.value ? '可达性热力图' : props.title
 })
 const subText = computed(() => {
+  if (isIsochrone.value) return '直线 vs 路网'
   if (isDegree.value) return '越深覆盖越多'
   return isHeat.value ? heatLegendSubtitle(props.heatKey) : props.subtitle
 })
+
+/**
+ * 等时圈图例（2026-11-04 加）。
+ *
+ * ★ 和另外三套的本质区别：它不是「值 → 颜色」也不是「类别 → 颜色」，
+ *   而是「**图层 → 图形**」——图上同时有三个东西，用户必须先分清谁是谁。
+ *   所以条目里带 shape，渲染时画成虚线圆 / 填充面 / 细线，而不是色点。
+ * ★ 颜色与 drawing.js 里三个图层严格一致：
+ *   圆 #d93025（分析态红，虚线）、面/路网 #1565C0（蓝）。
+ */
+const ISOCHRONE_ITEMS = [
+  { key: 'circle', label: '直线 800 m', shape: 'dash', color: '#d93025' },
+  { key: 'surface', label: '路网可达面', shape: 'fill', color: '#1565C0' },
+  { key: 'network', label: '可达路网', shape: 'line', color: '#1565C0' },
+]
 
 /**
  * 图例条目。
@@ -68,6 +86,7 @@ const subText = computed(() => {
  *   必须用一个空心/虚线块表达，否则用户会以为地图没加载完。
  */
 const items = computed(() => {
+  if (isIsochrone.value) return ISOCHRONE_ITEMS
   if (isDegree.value) {
     return props.degrees.map((d) => ({
       key: 'deg' + d.deg,
@@ -86,14 +105,21 @@ const items = computed(() => {
 </script>
 
 <template>
-  <div class="legend" :class="{ 'is-heat': isHeat, 'is-degree': isDegree }">
+  <div class="legend" :class="{ 'is-heat': isHeat, 'is-degree': isDegree, 'is-iso': isIsochrone }">
     <div class="head">
       <span class="title">{{ titleText }}</span>
       <span class="sub">{{ subText }}</span>
     </div>
     <ul v-if="items.length" class="list">
       <li v-for="it in items" :key="it.key" class="item">
-        <span v-if="it.color" class="dot" :style="{ background: it.color }" />
+        <!-- 等时圈：按 shape 画虚线圆 / 填充面 / 细线 -->
+        <template v-if="it.shape">
+          <span v-if="it.shape === 'dash'" class="glyph glyph-dash" :style="{ borderColor: it.color }" />
+          <span v-else-if="it.shape === 'fill'" class="glyph glyph-fill"
+                :style="{ background: it.color + '22', borderColor: it.color }" />
+          <span v-else class="glyph glyph-line" :style="{ background: it.color }" />
+        </template>
+        <span v-else-if="it.color" class="dot" :style="{ background: it.color }" />
         <!-- 无覆盖档：虚线空心块 -->
         <span v-else class="dot is-empty" />
         <span class="label">{{ it.label }}</span>
@@ -128,6 +154,33 @@ const items = computed(() => {
 /* 重叠度：档数不定（最多 6），条目标签最长「6 重」，常规宽度够 */
 .legend.is-degree {
   width: 148px;
+}
+/* 等时圈：三条说明比色点长，略加宽 */
+.legend.is-iso {
+  width: 156px;
+}
+
+/* ═══ 等时圈的三种图形 ═══
+   为什么不用统一色点：这三样是"三个图层"，形状本身就是信息 ——
+   虚线圆 = 直线口径、填充面 = 可达范围、细线 = 路网。 */
+.glyph {
+  flex: none;
+  width: 14px;
+  height: 10px;
+  box-sizing: border-box;
+}
+.glyph-dash {
+  border: 1.5px dashed;
+  border-radius: 50%;
+  height: 12px;
+}
+.glyph-fill {
+  border: 1.5px solid;
+  border-radius: 2px;
+}
+.glyph-line {
+  height: 3px;
+  border-radius: 1.5px;
 }
 
 .head {

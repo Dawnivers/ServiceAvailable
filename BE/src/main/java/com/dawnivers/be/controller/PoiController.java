@@ -117,4 +117,28 @@ public class PoiController {
         }
         return poiService.overlay(req.shapes(), Boolean.TRUE.equals(req.withItems()));
     }
+
+    /**
+     * 路网等时圈：从点击点沿步行路网走 budget 米能到的地方。
+     *
+     * <pre>
+     *   GET /api/poi/isochrone?lon=114.36&amp;lat=30.54&amp;budget=800&amp;limit=50
+     * </pre>
+     *
+     * ★ 与 /nearby 是**同口径对照**而不是替代：
+     *   nearby    = 直线 800 m（ST_DWithin）
+     *   isochrone = 路网 800 m（pgr_drivingDistance）
+     *   两个都调，面板上才能说「面积只剩 54%、设施还有 96%」。
+     *
+     * ★ 用 GET 不用 POST：参数就 4 个数字，不涉及 WKT，
+     *   不会撞 Tomcat 8KB 请求行限制（/within 才需要小心那个）。
+     */
+    @GetMapping("/isochrone")
+    public JsonNode isochrone(@RequestParam double lon,
+            @RequestParam double lat,
+            @RequestParam(defaultValue = "800") double budget,
+            @RequestParam(defaultValue = "50") int limit) {
+
+        return poiService.isochrone(lon, lat, budget, limit);
+    }
 }
