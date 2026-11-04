@@ -116,12 +116,11 @@ function syncDrawing() {
   drawing.setTool(analysis.tool, {
     // 点选：落一个中心点，交给 store
     onPoint: ({ lon, lat }) => analysis.setCenter({ lon, lat }),
-    // 手绘 / 框选：拿到 4326 的 WKT，下一步直接喂 /api/poi/within
-    onPolygon: ({ wkt, areaKm2 }) => analysis.setGeometry({ wkt, areaKm2 }),
     // 测距：只在地图上留一条线和长度标签
     onMeasure: ({ meters }) => analysis.setMeasure(meters),
-    // 叠加：每画完一个面就追加进 shapes（不清场）。字母/颜色由 store 分配，
-    // 分配完 store 会触发 overlayShapes watcher，再由 applyShapeMeta 回写到地图。
+    // 叠加：每次点击追加一个「圆面」（2026-11-04 起叠加只叠圆）。
+    // 字母/颜色由 store 分配，分配完 store 会触发 overlayShapes watcher，
+    // 再由 applyShapeMeta 回写到地图。
     onShape: (shape) => {
       const ok = analysis.addShape(shape);
       if (!ok) {

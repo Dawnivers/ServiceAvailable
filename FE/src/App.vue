@@ -18,8 +18,6 @@ import { useGridStore } from './stores/grid.js';
 import {
   useAnalysisStore,
   TOOLS,
-  TOOLS_BASE,
-  TOOLS_OVERLAY,
   CATEGORIES,
   RADIUS,
   MAX_SHAPES,
@@ -499,13 +497,13 @@ const onToolChange = (t) => analysis.setTool(t)
 /**
  * 工具栏显示哪些工具。
  *
- * ★ 2026-11-04 起分组：普通分析模式只有「点选 / 测距」——
- *   矩形和自由绘制回答的是「这块地里有什么」，不属于「从这里能走到哪」，
- *   混在一起会让用户以为画个框也能算可达性。
- * ★ 叠加模式反过来：它必须能连续画面（2–6 个求交），画圆没有意义，
- *   所以那一组是「框选 / 自由绘制」。
+ * ★ 2026-11-04 定稿：全项目只剩「点选 / 测距」——
+ *   矩形与自由绘制回答的是「这块地里有什么」，
+ *   不属于「从一个点出发能走到哪」这个命题，已整体移除；
+ *   叠加分析改为「多个 800 m 步行圈求交」，用的也是点选。
+ * ★ 不再需要按 overlay 切换工具组，这一行就是全部。
  */
-const toolList = computed(() => (analysis.overlay ? TOOLS_OVERLAY : TOOLS_BASE))
+const toolList = TOOLS
 const onRadiusChange = (v) => analysis.setRadius(v)
 const onCategoryToggle = (k) => analysis.toggleCategory(k)
 

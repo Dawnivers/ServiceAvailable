@@ -5,27 +5,25 @@ import { useAnalysisStore } from '@/stores/analysis.js';
  * ════════════════════════════════════════════════════════════
  * useBufferAnalysis —— 分析结果的取数器
  *
- * 职责：盯着 analysis store 的「中心 / 多边形 / 半径 / 叠加面」，
- *       自动去调接口，把结果写回 store。组件不碰 fetch。
+ * 职责：盯着 analysis store 的「中心 / 半径 / 叠加圆」，自动去调接口，
+ *       把结果写回 store。组件不碰 fetch。
  *
- * 三条路：
+ * 两条路（2026-11-04：矩形/自由绘制移除，/within 分支一并删除）：
  *   点选（有 center）   → GET  /api/poi/nearby?lon&lat&radius
- *   多边形（有 geometry）→ GET  /api/poi/within?wkt
- *   叠加（有 2+ 个面）   → POST /api/poi/overlay
+ *   叠加（有 2+ 个圆）  → POST /api/poi/overlay
  *
  * 三个必须处理的问题：
  *   ① 防抖：半径滑杆拖动时 input 连续触发，不防抖会打几十个请求
  *   ② 去重：同一组参数不重复请求（比如只切换类别勾选，不该重新查库）
  *   ③ 竞态：慢请求回来时用户可能已经改了半径/换了范围，旧结果必须丢弃
  *
- * ★ 叠加走 POST 而不是 GET：6 个面 × 每个几百个顶点拼进请求行会撞
- *   Tomcat 默认 8KB 上限；WKT 里的 "+" 在 query string 还会被解成空格。
+ * ★ 叠加走 POST 而不是 GET：面数最多 6 个，每个都带经纬度与半径，
+ *   拼进请求行虽然不至于超限，但 POST + JSON 更能表达"一组结构化参数"。
  * ════════════════════════════════════════════════════════════
  */
 
 const DEBOUNCE_MS = 260;
 const NEARBY_LIMIT = 50; // 后端上限就是 50
-const WITHIN_LIMIT = 50; // 后端上限 200，50 条足够面板展示与导出
 
 export function useBufferAnalysis() {
   const analysis = useAnalysisStore();
@@ -62,7 +60,7 @@ export function useBufferAnalysis() {
   function requestKey() {
     if (!analysis.active) return null;
 
-    // ★ 叠加优先：它和单图形是互斥的两条路，开着就不再走 nearby/within
+    // ★ 叠加优先：它和单图形是互斥的两条路，开着就不再走 nearby
     if (analysis.overlay) {
       if (analysis.shapes.length < 2) return null; // 1 个面没有「叠加」可言
       return `overlay|${shapesKey()}`;
@@ -71,15 +69,11 @@ export function useBufferAnalysis() {
     // 测距不需要统计
     if (analysis.tool === 'measure') return null;
 
-    if (analysis.tool === 'point') {
-      const c = analysis.center;
-      if (!c) return null;
-      return `nearby|${c.lon}|${c.lat}|${analysis.radius}`;
-    }
-
-    const g = analysis.geometry;
-    if (!g?.wkt) return null;
-    return `within|${g.wkt}`;
+    // 2026-11-04：矩形/自由绘制已移除，这里只剩「点选」一条路。
+    // （/api/poi/within 的调用分支一并删掉了 —— 没有工具能产出 WKT）
+    const c = analysis.center;
+    if (!c) return null;
+    return `nearby|${c.lon}|${c.lat}|${analysis.radius}`;
   }
 
   async function fetchResult(key, mySeq) {
@@ -110,7 +104,8 @@ export function useBufferAnalysis() {
             withItems: false,
           }),
         };
-      } else if (key.startsWith('nearby')) {
+      } else {
+        // 只剩点选（nearby）；矩形/自由绘制移除后没有别的分支
         const c = analysis.center;
         const qs = new URLSearchParams({
           lon: String(c.lon),
@@ -119,8 +114,6 @@ export function useBufferAnalysis() {
           limit: String(NEARBY_LIMIT),
         });
         url = `/api/poi/nearby?${qs}`;
-      } else {
-        url = `/api/poi/within?wkt=${encodeURIComponent(analysis.geometry.wkt)}&limit=${WITHIN_LIMIT}`;
       }
 
       // ★ 计时只统计网络+服务端往返，不含前面的防抖等待
@@ -259,7 +252,8 @@ export function useBufferAnalysis() {
       analysis.radius,
       analysis.center?.lon,
       analysis.center?.lat,
-      analysis.geometry?.wkt,
+      // ★ 2026-11-04：analysis.geometry 已移除（矩形/自由绘制下线），
+      //   这里的依赖少一条；shapesKey 仍然覆盖叠加圆的增删改。
       analysis.overlay,
       shapesKey(),
     ],

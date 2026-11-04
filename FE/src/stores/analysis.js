@@ -29,33 +29,26 @@ import { defineStore } from 'pinia';
 //     点选   → 一个点 + 半径 → 圆（走 /api/poi/nearby）
 //     自由绘制 → 任意多边形   → 走 /api/poi/within
 //     框选   → 矩形           → 也走 /api/poi/within（矩形是特殊多边形）
+/**
+ * 工具栏上的工具（2026-11-04 定稿：只保留两个）。
+ *
+ * ★ 为什么删掉「矩形 / 自由绘制」：
+ *   它们回答的是「**这块地里**有什么」，属于任意范围的检索；
+ *   而本项目的命题是「**从我的位置出发，走得到什么**」——
+ *   可达性的起点必须是一个点（一个家、一个小区门口），
+ *   一块地没有"从哪儿出发"可言，算不出可达性。
+ *
+ * ★ 叠加分析同样只叠圆：
+ *   它是「多个 800 m 步行圈求交」——回答"哪些地方同时处在几个点的
+ *   步行范围内"（比如选幼儿园：同时被爸妈单位和家覆盖的片区）。
+ *   叠矩形/手绘面在语义上是"我圈了几块地求交"，与可达性无关。
+ *
+ * 所以 rect / freehand 两条链路（绘制、WKT、/api/poi/within 的调用）一并移除；
+ * 后端 /api/poi/within 接口保留（它是通用的范围统计，不碍事，也有测试）。
+ */
 export const TOOLS = [
   { key: 'point', label: '点选' },
-  { key: 'freehand', label: '自由绘制' },
-  { key: 'rect', label: '框选' },
   { key: 'measure', label: '测距' },
-];
-
-/**
- * 工具分组（2026-11-04 起）。
- *
- * ★ 为什么分组：矩形 / 自由绘制是「圈一块地」的画法，
- *   它们回答的是「这块地里有什么」，和「从这里能走到哪」是两种问题。
- *   可达性分析只认一个起点（点选），所以**非叠加模式下不再暴露这两个工具**。
- *
- * ★ 但叠加分析离不开它们：叠加就是「连续画 2–6 个面相求交」，
- *   只允许画圆的话叠加就退化成同心圆，没有意义。
- *   所以它们在**叠加模式下仍然可用**，只是不出现在普通分析模式的工具栏里。
- *
- * 校验白名单仍然用合并后的 TOOLS —— 程序调用/快捷键传进来时依旧合法。
- */
-export const TOOLS_BASE = [
-  { key: 'point', label: '点选' },
-  { key: 'measure', label: '测距' },
-];
-export const TOOLS_OVERLAY = [
-  { key: 'rect', label: '框选' },
-  { key: 'freehand', label: '自由绘制' },
 ];
 
 /** 参与统计的类别。key 必须和后端 category 字段一致 */
@@ -70,12 +63,17 @@ export const CATEGORIES = [
 export const RADIUS = { min: 100, max: 2000, step: 50, default: 800 };
 
 // ════════════════════════════════════════════════════════════
-//  叠加分析：多面求交 / 重叠度
+//  叠加分析：多个步行圈求交 / 按重叠度统计
 //
-//  与「单图形分析」的关系：它是一个**开关**，不是第 5 个工具。
-//  开着的时候，框选 / 自由绘制 / 点选都照常可用，只是**画完不清场**，
-//  一个接一个地累积成多个面；关掉就回到原来「一次一个图形」的逻辑。
-//  这样不用在工具栏里塞一个和 rect/freehand 语义打架的选项。
+//  与「单图形分析」的关系：它是一个**开关**，不是第 3 个工具。
+//  开着的时候，点选的每一次点击都**追加**一个圆（画完不清场），
+//  累积成 2–6 个圆后由后端平面细分求交；关掉就回到「一次一个圆」。
+//
+//  ★ 2026-11-04：叠加从「矩形/手绘面」改成「只叠圆」。
+//    理由与工具移除一致：可达性以"点"为起点，
+//    叠圆的语义是"哪些地方同时被 N 个步行圈覆盖"（例如选幼儿园时，
+//    同时落在爸妈公司和家 800 m 内的片区），这是有意义的问题；
+//    叠矩形/手绘面则退化成"我圈了两块地求交"，与可达性无关。
 // ════════════════════════════════════════════════════════════
 
 /**
@@ -110,13 +108,12 @@ const DEFAULT_CATEGORIES = () => ({
 export const useAnalysisStore = defineStore('analysis', {
   state: () => ({
     active: false, // 是否处于分析模式
-    tool: 'point', // 'point' | 'rect' | 'measure'
-    radius: RADIUS.default, // 缓冲区半径，米（只在 point 模式有意义）
+    tool: 'point', // 'point' | 'measure'（2026-11-04 起只剩这两个）
+    radius: RADIUS.default, // 缓冲区半径，米（点选的圆、叠加的每个圆都用它）
     categories: DEFAULT_CATEGORIES(), // 参与统计的类别
     center: null, // 分析中心 { lon, lat, name } | null
-    geometry: null, // 画出来的多边形 { wkt, areaKm2 } | null（下一步拿去调 /within）
     measure: null, // 测距结果，单位米
-    result: null, // 接口原始结果（点选→NearbyDto / 多边形→WithinDto）
+    result: null, // 接口原始结果（/api/poi/nearby）
     resultLoading: false,
     resultError: null,
     resultMs: null, // 这次请求的实际耗时（毫秒），底部 SQL 提示条用
@@ -205,8 +202,8 @@ export const useAnalysisStore = defineStore('analysis', {
         count,
         byCategory,
         items,
-        // 两种模式的元信息不一样，UI 据此决定副标题
-        mode: s.tool === 'point' ? 'circle' : 'area',
+        // 2026-11-04：只剩圆口径（矩形/自由绘制已移除），mode 恒为 'circle'
+        mode: 'circle',
         radiusM: r.radiusM ?? null,
         areaKm2: r.areaKm2 ?? null,
         centerName: s.center?.name ?? null,
@@ -218,21 +215,19 @@ export const useAnalysisStore = defineStore('analysis', {
      *
      * ★ 放 getter 是为了只有一处真相：面板取数和导出 CSV 用的是**同一个载荷**，
      *   各拼一份迟早会漏字段（比如导出时忘了带 radius，圆就变成 0 米）。
-     * ★ 只传几何来源，不传颜色/面积那些展示字段 —— 见 /api/poi/overlay 的说明。
+     * ★ 2026-11-04：叠加只剩圆，这里不再有 'area' 分支。
+     *   后端 /api/poi/overlay 仍然接受 kind='area'（接口没动），
+     *   只是前端不再产生那种载荷。
      */
     overlayShapes: (s) =>
-      s.shapes.map((x) =>
-        x.kind === 'circle'
-          ? {
-              id: x.id,
-              name: x.label,
-              kind: 'circle',
-              lon: x.lon,
-              lat: x.lat,
-              radius: x.radius,
-            }
-          : { id: x.id, name: x.label, kind: 'area', wkt: x.wkt },
-      ),
+      s.shapes.map((x) => ({
+        id: x.id,
+        name: x.label,
+        kind: 'circle',
+        lon: x.lon,
+        lat: x.lat,
+        radius: x.radius,
+      })),
 
     /**
      * 「真实可达」面板要渲染的数据（与 displayResult 同一套类别过滤逻辑）。
@@ -305,7 +300,6 @@ export const useAnalysisStore = defineStore('analysis', {
       this.active = true;
       this.tool = 'point'; // 带中心点进来时一定是点选语义
       this.center = center;
-      this.geometry = null;
       this.measure = null;
       this.result = null; // 上一轮的结果作废
       this.clearIsochrone(); // 路网等时圈同样作废（否则会带着上次的面进来）
@@ -317,7 +311,6 @@ export const useAnalysisStore = defineStore('analysis', {
       this.active = false;
       this.tool = 'point';
       this.center = null;
-      this.geometry = null;
       this.measure = null;
       this.result = null;
       this.resultError = null;
@@ -327,9 +320,7 @@ export const useAnalysisStore = defineStore('analysis', {
       /**
        * ★ 2026-11-04 修：退出时必须把叠加开关也关掉。
        *   原来只调 resetOverlay()（它清面、清结果，但**不动 overlay 这个布尔值**），
-       *   于是「退出 → 再进分析」会直接落在叠加模式里：
-       *   工具栏显示的是框选/自由绘制、点一下地图却画不出点选的圆，
-       *   实测就是这样多出一个 A·缓冲区 800 m 的面。
+       *   于是「退出 → 再进分析」会直接落在叠加模式里。
        */
       this.overlay = false;
       this.resetOverlay();
@@ -373,16 +364,6 @@ export const useAnalysisStore = defineStore('analysis', {
     clearCenter() {
       this.center = null;
       this.result = null;
-    },
-
-    /** 手绘/框选画完一个多边形。wkt 已是 4326，可直接喂 /api/poi/within */
-    setGeometry(geometry) {
-      this.geometry = geometry;
-      // 画了多边形就不再走"圆心 + 半径"那条路，两者互斥
-      this.center = null;
-      this.result = null;
-      // 等时圈只认"一个起点"，多边形没有起点可言 → 一起清掉
-      this.clearIsochrone();
     },
 
     /** 测距结果（米） */
@@ -473,10 +454,10 @@ export const useAnalysisStore = defineStore('analysis', {
     /**
      * 开关叠加分析。
      *
-     * ★ 打开时清掉单图形那一套（圆心 / 多边形 / 结果），
-     *   两者的产物在地图上会互相干扰：
-     *   单图形模式下 drawing 一旦 setCenter 就会 removeByKind('circle')，
-     *   而叠加模式的面用的是 kind='shape'，本来就是两套，但 store 里混着会乱。
+     * ★ 2026-11-04 起叠加 = **多个 800 m 步行圈求交**（只叠圆）。
+     *   打开时清掉单图形那一套（圆心 / 结果 / 等时圈），
+     *   因为两者的产物在地图上会互相干扰：单图形下 setCenter 会重画唯一的缓冲圈，
+     *   而叠加模式的面是 kind='shape' 的累积图形。
      */
     setOverlay(on) {
       const next = !!on;
@@ -487,22 +468,18 @@ export const useAnalysisStore = defineStore('analysis', {
 
       if (next) {
         this.center = null;
-        this.geometry = null;
         this.measure = null;
         this.result = null;
         this.resultError = null;
         this.resultMs = null;
         this.clearIsochrone(); // 叠加模式不做等时圈
-        // 测距不出统计，叠加入口不能停在它上面
-        if (this.tool === 'measure') this.tool = 'rect';
+        // ★ 叠加只画圆，所以工具必须落在「点选」上；
+        //   原来这里是"测距就换成矩形"，矩形移除后直接归到点选。
+        this.tool = 'point';
       } else {
-        /**
-         * ★ 2026-11-04：关掉叠加时要检查「当前工具是否还在可用列表里」。
-         *   叠加模式用的是 rect / freehand，而普通分析模式只暴露 point / measure。
-         *   不收回的话，工具栏上会出现「一个都没选中」的状态，
-         *   而且 drawing 里还挂着一个用户看不见按钮的矩形交互 —— 点地图就画框，莫名奇妙。
-         */
-        if (!TOOLS_BASE.some((t) => t.key === this.tool)) this.tool = 'point';
+        // 关掉后工具只可能是 point / measure，仍是合法的，无需纠正。
+        // （保留这道判断是为了将来再加工具时不至于留一个失效的 tool）
+        if (!TOOLS.some((t) => t.key === this.tool)) this.tool = 'point';
       }
     },
 
@@ -524,10 +501,10 @@ export const useAnalysisStore = defineStore('analysis', {
     },
 
     /**
-     * 追加一个面。
+     * 追加一个面（2026-11-04 起只可能是圆）。
      *
-     * @param {{ id:string, kind:'area'|'circle', wkt?:string, lon?:number,
-     *           lat?:number, radius?:number, areaKm2:number }} shape
+     * @param {{ id:string, kind:'circle', lon?:number, lat?:number,
+     *           radius?:number, areaKm2:number }} shape
      *        id 由 drawing.js 生成（它才是持有 OL Feature 的一方），
      *        字母和颜色按「当前第几个」分配，删掉后会重新排。
      * @returns {boolean} 是否加成功（超过上限返回 false）
@@ -542,8 +519,7 @@ export const useAnalysisStore = defineStore('analysis', {
         id: shape.id,
         label: SHAPE_LABELS[idx],
         color: SHAPE_COLORS[idx],
-        kind: shape.kind,
-        wkt: shape.wkt ?? null,
+        kind: 'circle',
         lon: shape.lon ?? null,
         lat: shape.lat ?? null,
         radius: shape.radius ?? null,
@@ -555,8 +531,8 @@ export const useAnalysisStore = defineStore('analysis', {
       this.overlayError = null;
       this.clearOverlayItems();
 
-      // ★ 刚画完的圆成为「可调半径」的那一个；画多边形则把上一个圆顶掉
-      this.activeShapeId = shape.kind === 'circle' ? shape.id : null;
+      // 刚画完的圆就是「可调半径」的那一个
+      this.activeShapeId = shape.id;
       return true;
     },
 

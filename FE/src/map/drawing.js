@@ -4,9 +4,14 @@
  *
  * 职责：把「当前工具 + 半径 + 中心点」翻译成地图上的图形与交互。
  *   point    → 单击落一个中心点 + 半径圆（缓冲圈）
- *   freehand → 按住拖拽手绘任意多边形
- *   rect     → 拖拽出矩形（本质是特殊的多边形）
  *   measure  → 连续点击量距离
+ *   叠加模式 → point 的每次点击追加一个圆（kind='shape'），不清场
+ *
+ * ★ 2026-11-04：freehand（自由绘制）与 rect（框选）已移除。
+ *   它们服务于「圈一块地看里面有什么」，而本项目问的是
+ *   「从我的位置出发，走得到什么」——起点必须是点，不是面。
+ *   连带删掉的东西：WKT 导出（toWkt）、多边形面积（getArea/formatArea）、
+ *   getPolygon()、onPolygon 回调，以及 /api/poi/within 的前端调用。
  *
  * 与 store 的分工（沿用本项目的一贯纪律）：
  *   本文件不 import store，只接收参数、回调上报。
@@ -19,14 +24,13 @@
 
 import VectorLayer from 'ol/layer/Vector.js';
 import VectorSource from 'ol/source/Vector.js';
-import Draw, { createBox } from 'ol/interaction/Draw.js';
+import Draw from 'ol/interaction/Draw.js';
 import Feature from 'ol/Feature.js';
 import Point from 'ol/geom/Point.js';
 import Circle from 'ol/geom/Circle.js';
 import GeoJSON from 'ol/format/GeoJSON.js';
 import { Style, Stroke, Fill, Circle as CircleStyle, Text } from 'ol/style.js';
-import { getArea, getLength } from 'ol/sphere.js';
-import WKT from 'ol/format/WKT.js';
+import { getLength } from 'ol/sphere.js';
 import { fromLonLat, toLonLat } from 'ol/proj.js';
 
 // 重叠度色板只有这一个定义处（面板的色块也读它）。
@@ -192,10 +196,7 @@ function labelAnchor(geom, kind) {
 }
 
 // ── 单位格式化 ─────────────────────────────────────────────
-function formatArea(m2) {
-  return m2 >= 1e6 ? `${(m2 / 1e6).toFixed(2)} km²` : `${Math.round(m2)} m²`;
-}
-
+// （面积格式化已随矩形/自由绘制一起移除：现在只剩圆，面积用 πr² 直接算）
 function formatLength(m) {
   return m >= 1000 ? `${(m / 1000).toFixed(2)} km` : `${Math.round(m)} m`;
 }
@@ -273,7 +274,7 @@ export function createDrawingController(map) {
   let tool = null;
   let radius = 800; // 米
   let center = null; // { lon, lat } 度
-  let handlers = {}; // { onPoint, onPolygon, onMeasure, onShape }
+  let handlers = {}; // { onPoint, onMeasure, onShape }
 
   /** 叠加分析是否开启（开启时画完**不清场**，连续累积多个面） */
   let overlay = false;
@@ -568,29 +569,15 @@ export function createDrawingController(map) {
     source.addFeature(new Feature({ kind: 'center', geometry: new Point(c) }));
   }
 
-  // ── 导出 ──────────────────────────────────────────────────
-  /** 3857 几何 → WGS84 WKT。后端 /api/poi/within 只认 4326 */
-  function toWkt(geom) {
-    return new WKT().writeGeometry(geom, {
-      dataProjection: 'EPSG:4326',
-      featureProjection: proj(),
-    });
-  }
-
-  /** 当前画的多边形（没有就返回 null） */
-  function getPolygon() {
-    const f = source.getFeatures().find((x) => x.get('kind') === 'polygon');
-    if (!f) return null;
-    const geom = f.getGeometry();
-    return { wkt: toWkt(geom), areaKm2: getArea(geom) / 1e6 };
-  }
-
   // ── 工具切换 ──────────────────────────────────────────────
   /**
-   * @param {'point'|'freehand'|'rect'|'measure'|null} next
-   * @param {{ onPoint?:Function, onPolygon?:Function, onMeasure?:Function,
-   *           onShape?:Function }} cb
-   *        onShape 只在叠加模式下触发，带 { id, kind, wkt?, lon?, lat?, radius?, areaKm2, label }
+   * 2026-11-04：只剩 point / measure 两种。
+   * rect / freehand 连同它们的 WKT 导出、面积计算一并移除 ——
+   * 「圈一块地」与本项目「从一个点出发能到哪」不是同一个命题。
+   *
+   * @param {'point'|'measure'|null} next
+   * @param {{ onPoint?:Function, onMeasure?:Function, onShape?:Function }} cb
+   *        onShape 只在叠加模式下触发，带 { id, lon, lat, radius, areaKm2, label }
    */
   function setTool(next, cb = {}) {
     // ★ 只有「工具真的换了」才清图形。
@@ -602,9 +589,9 @@ export function createDrawingController(map) {
     tool = next;
     handlers = cb;
 
-    // ★ 换工具 = 上一轮画的圆/多边形/测距线全部作废（用户明确要求）
-    // ★ 但**叠加模式下不能清** —— 这正是这次要解决的问题：
-    //   画到第 3 个想从「框选」换「自由绘制」，前两个不该消失。
+    // ★ 换工具 = 上一轮画的圆/测距线全部作废（用户明确要求）
+    // ★ 但**叠加模式下不能清** —— 叠加是「连续画多个圆」，
+    //   画到第 3 个时前面两个不该消失。
     if (changed && !overlay) clear();
 
     if (!next) return;
@@ -638,59 +625,6 @@ export function createDrawingController(map) {
         //   推到下一拍再画：那时要素已在 source 里，paintCircle 能把它一起清掉。
         setTimeout(paintCircle, 0);
         handlers.onPoint?.({ lon, lat });
-      });
-    } else if (next === 'freehand') {
-      // 自由绘制：点击加折点，双击闭合。
-      // ★ 不用 freehand:true —— 那是"按住鼠标拖"的画法，用户要的是逐点点击
-      // Draw 默认的 Polygon 行为就是：单击加点、双击（在最后一个点上）结束并闭合
-      draw = new Draw({ source, type: 'Polygon' });
-      draw.on('drawend', (e) => {
-        const geom = e.feature.getGeometry();
-        const area = getArea(geom); // ★ ol/sphere 的球面面积，不是投影面积
-
-        // ── 叠加模式：追加，不替换 ──
-        if (overlay) {
-          const meta = registerShape(e.feature, {
-            kind: 'area',
-            wkt: toWkt(geom),
-            areaKm2: area / 1e6,
-            label: formatArea(area),
-          });
-          handlers.onShape?.(meta);
-          return;
-        }
-
-        // 完成时替换上一个多边形（不在这里 clear 全部，原因见文件末尾注释）
-        removeByKind('polygon');
-        e.feature.set('kind', 'polygon');
-        e.feature.set('label', formatArea(area));
-        handlers.onPolygon?.({ wkt: toWkt(geom), areaKm2: area / 1e6 });
-      });
-    } else if (next === 'rect') {
-      // 框选：点击定第一个角 → 移动鼠标实时改变长宽 → 再点击完成。
-      // ★ type:'Circle' + createBox() 就是"两击"交互，不是拖拽。
-      //   （Draw 在非手绘模式下只要拖动位移超容差就放弃接管，事件会落到
-      //     DragPan 变成平移地图 —— 所以千万别让用户"按住拖"）
-      draw = new Draw({ source, type: 'Circle', geometryFunction: createBox() });
-      draw.on('drawend', (e) => {
-        const geom = e.feature.getGeometry();
-        const area = getArea(geom);
-
-        if (overlay) {
-          const meta = registerShape(e.feature, {
-            kind: 'area',
-            wkt: toWkt(geom),
-            areaKm2: area / 1e6,
-            label: formatArea(area),
-          });
-          handlers.onShape?.(meta);
-          return;
-        }
-
-        removeByKind('polygon');
-        e.feature.set('kind', 'polygon');
-        e.feature.set('label', formatArea(area));
-        handlers.onPolygon?.({ wkt: toWkt(geom), areaKm2: area / 1e6 });
       });
     } else if (next === 'measure') {
       // 测距在叠加模式下没有意义（store 那边会把 tool 从 measure 踢走）
@@ -765,7 +699,6 @@ export function createDrawingController(map) {
     setTool,
     setRadius,
     setCenter,
-    getPolygon,
     clear,
     destroy,
 
