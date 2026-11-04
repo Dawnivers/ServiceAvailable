@@ -161,7 +161,7 @@ function onPick(item) {
     <!-- ═══ 正常 ═══ -->
     <template v-else-if="result">
       <div class="head">
-        <span class="head-title">可达性分析结果</span>
+        <span class="head-title">直线可达性分析结果</span>
         <span class="head-sub" :title="subtitle(result)">{{ subtitle(result) }}</span>
       </div>
 
