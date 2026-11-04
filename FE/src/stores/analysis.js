@@ -62,6 +62,33 @@ export const CATEGORIES = [
 /** 半径滑杆的范围。后端校验是 (0, 5000]，这里收窄到更实用的区间 */
 export const RADIUS = { min: 100, max: 2000, step: 50, default: 800 };
 
+/**
+ * 步行速度：80 米/分钟（= 1.33 m/s）。
+ *
+ * ★ 为什么是这个数：项目从 README 到 roadmap 一直用「800 m ≈ 步行 10 分钟」
+ *   （对齐《城市居住区规划设计标准》慢行 500–800 m），800 / 10 = 80。
+ *   这里把它固化成常量，滑杆实时显示分钟数才算"同一把尺子"——
+ *   改口径只改这一处，工具栏、地图标签、面板一起变。
+ *
+ * ★ 注意：这是**折算展示**用的（圆半径 → 时间），
+ *   路网口径那边换算的是「预算 = 速度 × 时间」，最终仍走 Dijkstra 的米制预算。
+ */
+export const WALK_M_PER_MIN = 80;
+
+/** 米 → 步行分钟数（保留一位，整数时省略小数） */
+export function metersToMinutes(meters) {
+  const min = Number(meters) / WALK_M_PER_MIN;
+  if (!Number.isFinite(min)) return null;
+  return Math.round(min * 10) / 10;
+}
+
+/** 分钟的展示文本：「10 分钟」/「3.5 分钟」 */
+export function minutesText(meters) {
+  const m = metersToMinutes(meters);
+  if (m == null) return '';
+  return `${Number.isInteger(m) ? m : m.toFixed(1)} 分钟`;
+}
+
 // ════════════════════════════════════════════════════════════
 //  叠加分析：多个步行圈求交 / 按重叠度统计
 //

@@ -35,7 +35,7 @@ import { fromLonLat, toLonLat } from 'ol/proj.js';
 
 // 重叠度色板只有这一个定义处（面板的色块也读它）。
 // 只取常量、不碰 store 状态，所以不违反「drawing 不 import store」的纪律。
-import { DEGREE_COLORS } from '@/stores/analysis.js';
+import { DEGREE_COLORS, minutesText } from '@/stores/analysis.js';
 
 // ── 配置区 ─────────────────────────────────────────────────
 const ACCENT = '#d93025'; // 分析态红，与顶栏徽章、滑杆统一
@@ -594,7 +594,9 @@ export function createDrawingController(map) {
     source.addFeature(
       new Feature({
         kind: 'circle',
-        label: `缓冲区 ${Math.round(radius)} m`,
+        // ★ 标签同时给米和分钟：800 m ≈ 10 分钟是本项目的口径，
+        //   只写米数，用户还得自己换算。换算常量在 stores/analysis.js。
+        label: `缓冲区 ${Math.round(radius)} m ≈ ${minutesText(radius)}`,
         geometry: new Circle(c, mapRadius),
       }),
     );

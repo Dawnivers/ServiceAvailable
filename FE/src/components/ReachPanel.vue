@@ -23,6 +23,7 @@
  */
 
 import { splitPercent } from '@/utils/percent'
+import { minutesText } from '@/stores/analysis.js'
 
 const CARD_W = 288
 const LIST_MAX = 5
@@ -161,7 +162,10 @@ const isNoNetwork = () => props.result?.status === 'no_network'
 
       <div class="summary">
         <span class="big">{{ result.count }}</span>
-        <span class="big-label">个设施在 {{ Math.round(result.usedBudgetM ?? 0) }} m 步行内</span>
+        <span class="big-label">
+          个设施在 {{ Math.round(result.usedBudgetM ?? 0) }} m
+          （≈{{ minutesText(result.usedBudgetM) }}）步行内
+        </span>
       </div>
 
       <div v-if="diffText(result)" class="diff">{{ diffText(result) }}（直线口径 {{ result.circleCount }} 个）</div>

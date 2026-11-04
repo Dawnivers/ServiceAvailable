@@ -21,6 +21,9 @@
  */
 
 // ── 1. 常量区 ───────────────────────────────────────────────
+import { computed } from 'vue'
+import { minutesText } from '@/stores/analysis.js'
+
 const ACCENT = '#d93025' // 分析模式的强调色（红），与勾选态一致
 const PANEL_W = 236 // 与 LayerPanel 同宽，切换时不会跳
 
@@ -63,6 +66,15 @@ const emit = defineEmits([
 ])
 
 // ── 3. 派生 ─────────────────────────────────────────────────
+/**
+ * 当前半径对应的步行时间文本（「10 分钟」/「3.5 分钟」）。
+ *
+ * ★ 换算走 store 的 minutesText → WALK_M_PER_MIN（80 m/分钟，即 800 m ≈ 10 分钟），
+ *   不在这里另写一个数字：滑杆、地图标签、面板必须同一把尺子，
+ *   否则「滑杆说 15 分钟、地图标签说 14 分钟」这种错最难查。
+ */
+const walkMinutesText = computed(() => minutesText(props.radius))
+
 /** 当前工具的中文名，标题右侧「点选模式」 */
 function modeText() {
   // 叠加是「跨工具」的模式，不是某个具体画法，所以单独报一个名字
@@ -195,10 +207,16 @@ const onCategory = (key) => {
         @input="onRadius"
       />
 
-      <!-- 三个刻度：左端 / 当前值 / 右端 -->
+      <!-- 三个刻度：左端 / 当前值 / 右端
+           ★ 当前值同时给"米"和"分钟"：项目口径是 800 m ≈ 步行 10 分钟，
+             拖滑杆时用户真正关心的是"这相当于走几分钟"，
+             只给米数还得自己换算。换算常量在 stores/analysis.js（WALK_M_PER_MIN）。 -->
       <div class="tp-scale">
         <span>{{ radiusRange.min }} m</span>
-        <span class="tp-cur">{{ radius }} m</span>
+        <span class="tp-cur">
+          {{ radius }} m
+          <span class="tp-cur-min">≈ {{ walkMinutesText }}</span>
+        </span>
         <span>{{ radiusRange.max }} m</span>
       </div>
     </div>
@@ -467,6 +485,15 @@ const onCategory = (key) => {
   text-align: center;
   color: #d93025;
   font-weight: 700;
+}
+
+/* 分钟数是「换算出来的」，比主数值弱一档：米是事实，分钟是按步速折算的 */
+.tp-cur-min {
+  margin-left: 4px;
+  font-weight: 400;
+  font-size: 9.5px;
+  color: #c26a5a;
+  white-space: nowrap;
 }
 
 /* ═══ 类别勾选 ═══ */

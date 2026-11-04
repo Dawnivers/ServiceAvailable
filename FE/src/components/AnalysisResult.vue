@@ -20,6 +20,7 @@
  */
 
 import { splitPercent } from '@/utils/percent'
+import { minutesText } from '@/stores/analysis.js'
 
 const CARD_W = 288 // 与 PoiDetailCard / LayerPanel 同宽，右侧不跳
 
@@ -60,7 +61,8 @@ function subtitle(r) {
 function scopeText(r) {
   if (!r) return ''
   if (r.mode === 'area') return '个设施在范围内'
-  return `个设施在 ${Math.round(r.radiusM ?? 0)} m 内`
+  // 半径后面带上步行时间：800 m ≈ 10 分钟是本项目的口径（WALK_M_PER_MIN）
+  return `个设施在 ${Math.round(r.radiusM ?? 0)} m（≈${minutesText(r.radiusM)}）内`
 }
 
 /**
