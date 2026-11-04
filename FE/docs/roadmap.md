@@ -2,7 +2,7 @@
 
 > 面向 `FE`（Vue 3 + Vite + OpenLayers）的开发清单。
 > 数据侧（采集/入库）见 `etl/spec.md`；服务侧（发布/样式）见本文 §7。
-> 最后更新：2026-11-03（进度同步：补记 F2–F5）
+> 最后更新：2026-11-04（F6 路网等时圈 / F7 叠加路网口径 + 工具收敛）
 
 ## 0. 项目形态（两张图定方向）
 
@@ -31,16 +31,19 @@
 | **D16–D18** ✅ | 格网 + 热力图（**2026-11-01 完成**） | `grid_500m` 表 + `wuhan:grid_500m` 图层 + 5 个 SLD + 前端可切换/可点选 | PostGIS 空间函数 |
 | **F2–F3** ✅ | 悬停高亮 + 选中态 + 类别联动（**2026-11-01 完成**） | `map/probe.js` 统一探针 + `map/hover.js` 悬停/选中双图层；缓冲圈半径按 1/cos 补偿（§2.4.15） | D18 的 `gridInfo` / `heatmap` |
 | **F5** ✅ | 叠加分析（**2026-11-02 完成**） | 2–6 个面：并集 / 交集 / 按重叠度分组 + 原子面出图 + CSV 导出（§2.4.14、§5.6） | 新增 `POST /api/poi/overlay` |
-| **D19–D20** ⏳ | 打磨 + 录屏 + README | README ✅ 11-03（已含 F5 与悬停）、12 张截图 ✅（**缺 F5 / 悬停两张**）、30 秒录屏 ❌ | 以上全部 |
+| **F6** ✅ | 路网等时圈（**2026-11-04 完成**） | `walk_ways` 入库 + `GET /api/poi/isochrone`；点选后同时出「直线圆 / 可达面 / 可达路网」三层 + 两张对照卡（§2.4.16） | pgRouting + OSM 步行网 |
+| **F7** ✅ | 叠加改为路网口径 + 工具收敛（**2026-11-04 完成**） | 每个圆先算成可达面再求交；`POST /api/poi/overlay-network`；删除矩形/自由绘制（§2.4.17） | F5 + F6 |
+| **F8** ✅ | 时间口径（**2026-11-04 完成**） | 80 m/分钟（800 m = 10 分钟）贯穿滑杆 / 地图标签 / 面板（§2.4.18） | F6 |
+| **D19–D20** ⏳ | 打磨 + 录屏 + README | README ✅ 11-04（已含 F6–F8）、12 张截图 ✅（**缺等时圈 / 叠加路网两张**）、30 秒录屏 ❌ | 以上全部 |
 | **D21** | 复盘 + 投递 | 简历 + 项目自述（仓库已上 GitHub：`Dawnivers/ServiceAvailable`） | — |
 
-> **当前站位（2026-11-03 复核）**：**F5 完成 → D19 中段**。
-> 后端 **8** 接口（含 `/overlay`）/ 格网表 / GeoServer **8** 个样式（`poi_*` 3 + `grid_*` 5）/
-> 前端 5 大能力（浏览、详情、缓冲区、热力图、叠加）全部就绪，版本已由 git 接管（56 个提交、有远端）。
-> 详见 §2.4.9–§2.4.15。剩下的只有「**展示与投递**」两件：30 秒录屏、简历与项目自述。
+> **当前站位（2026-11-04）**：**F6–F8 完成 → 回到 D19**。
+> 后端 **10** 接口（`/isochrone`、`/overlay-network` 是新增的两个）/ 步行网表 `walk_ways` 24 万条边 /
+> GeoServer 8 个样式 / 前端 6 大能力（浏览、详情、直线缓冲区、路网可达、热力图、叠加）。
+> 详见 §2.4.9–§2.4.18。剩下的仍是「**展示与投递**」：30 秒录屏、两张新截图、简历与项目自述。
 >
 > 进度账：计划 D5→D18 是 14 个工作日；实际 2026-10-27 → 11-01 用 **6 个自然日**走完（约 2.3×）；
-> F2–F5 又吃掉 11-01 晚 + 11-02 一整天。
+> F2–F5 吃掉 11-01 晚 + 11-02 一整天；F6–F8 又吃掉 11-03 下午 + 11-04 一天。
 
 ---
 
@@ -79,6 +82,15 @@
 | 6 | `src/stores/selection.js` | ✅ 完成（10-31） | 7.3 KB；只存 `{ gid, name, category, … }` 属性，不存 Feature |
 | 7 | `src/composables/useFeatureInfo.js` | ✅ 换实现（10-31） | 实际文件是 `src/map/clickToGid.js`（`GetFeatureInfo` → gid），职责一致、位置更贴地图层 |
 | 8 | `src/components/PoiDetailCard.vue` | ✅ 完成（10-31） | 13.5 KB（规格是固定骨架，做得更细） |
+
+**F6–F8 新增的文件（2026-11-04）**：
+
+| 文件 | 作用 |
+|---|---|
+| `src/components/ReachPanel.vue` | 「路网可达」结果卡：面积（路网/直线）、设施数、分类条、路网统计（段数/半截/里程/起点偏移）、导出按钮 |
+| `BE/src/main/resources/mapper/PoiMapper.xml` | 新增两条大查询：`isochrone`（九步等时圈，§2.4.16③）与 `isochroneGeom`（只要几何） |
+| `BE/.../PoiService.java` | 新增 `isochrone()` 与 `overlayNetwork()`（循环 N 个圆再复用叠加 SQL，§2.4.17③） |
+| `src/stores/analysis.js` | 新增 `WALK_M_PER_MIN` / `minutesText()` 时间口径（§2.4.18） |
 
 **D12 的技术核心**：`ImageLayer + ImageWMS` 是服务器画的整屏 PNG，浏览器侧**没有 Feature**，
 `forEachFeatureAtPixel()` 对它无效 → 点击必须走 `GetFeatureInfo` 问服务器。
@@ -1657,6 +1669,307 @@ function toMapRadius(meters, lat) {
 
 ---
 
+### 2.4.16 F6：路网等时圈（2026-11-04 完成）
+
+> 本节是本项目**最重要的一次口径升级**：把「800 m 直线圆」换成「沿路网走 800 m」。
+> 所有数字都实测过，涉及的表/SQL/参数按顺序写。
+
+#### ① 为什么必须做：直线口径在物理上是错的
+
+`ST_DWithin(geom::geography, 圆心, 800)` 等价于假设「**这片地上的每一点都能直线走过去**」。
+武汉被它忽略的东西：
+
+| 障碍 | 直线口径的后果 |
+|---|---|
+| 长江 / 汉江 | 对岸设施被算进「800 m 内」 |
+| 东湖 / 南湖 / 沙湖 | 跨湖直线可达，实际要绕大半圈 |
+| 京广线 / 三环高架 | 铁路与快速路把街区割断，图上看不见 |
+| 封闭小区 / 大院 / 校园 | 有围墙但直线照穿 |
+| 没有过街设施的主干道 | 对面 30 m，实际要走到下一个灯 |
+
+**实测差距（武大）**：同一个 800 m 预算，直线圆 **2.011 km²**，路网可达面 **0.99 km²**（49%）。
+
+#### ② 数据：OSM 步行网入库（这一步踩了 4 个坑）
+
+| 坑 | 症状 | 原因与解法 |
+|---|---|---|
+| **`osm2pgrouting 3.0.0` 只吃 `.osm` XML** | `not well-formed (invalid token) at line 1` | 它用 expat 解析，**没有 pbf 支持**（最新版就是 3.0.0，README 依赖清单里只有 expat）。用 BBBike 直接导出 `OSM XML gzip` |
+| **GDAL 在中文用户名下写不了临时索引** | `Cannot create C:\Users\������\AppData\Local\Temp\osm_tmp_nodes_*` | 路径按 ANSI 转码后变 `??????`。**`$env:TMP` 指到纯英文目录**（`D:\QGIS\Test\Wuhan\tmp`） |
+| **`hstore` 没装** | `ERROR: hstore not found` | `--attributes` 要用它：`CREATE EXTENSION hstore;` |
+| **`pgRouting` 没装** | `function pgr_connectedComponents does not exist` | `CREATE EXTENSION pgrouting;`（扩展按库启用，盘上有文件 ≠ 库里能用） |
+
+**导入结果（实测）**：
+
+```
+步行网  241,611 条边 / 183,396 个节点 / 52,225 km
+连通性  最大连通分量 95.55%  ✅（>80% 即健康）
+几何    SRID 4326 / LINESTRING
+索引    source / target / geom 都有（osm2pgrouting 自建）
+```
+
+> **`walk_ways` 里没有 `highway` 列**：类型存成 `tag_id`（整数），查字符串要
+> `JOIN configuration c ON c.tag_id = w.tag_id`，取 `c.tag_value`。
+> 这是 `osm2pgrouting` 的归一化设计：24 万行只存 4 字节整数。
+>
+> **`cost` 列单位是度**（179 m → 0.00186），**不能用**；`length_m` 才是米。
+> 所有 `pgr_*` 的边 SQL 都写 `length_m AS cost`。
+
+#### ③ 一条 SQL 跑完九步（`PoiMapper.isochrone`）
+
+```
+params   →  snap   →  used  →  dd  →  partial  →  skel  →  surf  →  pois  →  JSON
+```
+
+| 步 | 做什么 | 关键点 |
+|---|---|---|
+| `params` | 经纬度 → 点 + 预算 | `ST_MakePoint(经度, 纬度)` 顺序别写反；`ST_SetSRID(...,4326)` 不能省 |
+| `snap` | 点 → 最近路网节点 | **两步排序**：内层 `<->` 按度粗排取 5 个（走 GiST，21 ms），外层按米精排 |
+| `used` | `预算 − 吸附距离` | `GREATEST(...,0)` 防负；这是「从你家门口算 800 m」唯一的手段 |
+| `dd` | `pgr_drivingDistance` | 第 4 参 `false` = 无向（步行双向）；`WHERE edge <> -1` 去掉起点自身 |
+| `partial` | **补半截边** | `ST_LineSubstring` 第三参是**比例**不是米；切的方向要跟来路 |
+| `skel` | 焊成连续骨架 | `ST_Collect(ARRAY[...])` 打包 → `ST_LineMerge` 合并，点数 7,060 → 5,370 |
+| `surf` | 骨架 → 面 | `::geography`（50 是地面米）；先 `Simplify(0.00005)` 再 buffer 省 30%；`quad_segs=2` 让顶点 999 → 421 |
+| `pois` | 面内设施 | **统计与分页分两个 CTE**，否则 `count` 永远等于 `limit` |
+
+**补半截边为什么必做**：`pgr_drivingDistance` 只返回「完整走到」的节点，
+预算耗尽那条边整条被丢弃。实测**少 130 条边 / 4.5 km 路 / 27% 面积**（0.821 → 1.085 km²）。
+
+#### ④ 三个只在运行时暴露的坑
+
+**坑 1：CTE 不加 `MATERIALIZED` 会挂死（>120 秒）**
+
+PostgreSQL 12+ 把「只引用一次」的 CTE 内联成子查询。内联后执行计划变成
+「每读一行 poi 就跑一遍 buffer」→ 16,016 × 2 s。**给 `dd / skel / surf / pois_all`
+加 `MATERIALIZED`：2.5 秒。**
+
+> 反直觉之处：最早那版**碰巧没踩到**——因为 `surf.p` 被引用多次（面积、GeoJSON、
+> POI、骨架），PG 见多处引用会自动物化。**把查询拆简单之后反而踩了。**
+
+**坑 2：`poi` 表只有 `gist((geom::geography))` 表达式索引**
+
+`ST_Within(p.geom, 面)` 用的是 `p.geom`，表达式索引匹配不上 → 全表扫 16,016 条
+× 复杂面判断 = **分钟级**。补 `CREATE INDEX idx_poi_geom_gist ON poi USING GIST (geom);`
+（611 ms 建完，648 kB）。
+
+**坑 3：`round(double precision, int)` 不存在**
+
+`sum(length_m)` 返回 double，必须 `round((sum(...)/1000)::numeric, 2)`。
+这是本项目第三次踩同一个坑（前两次在 §2.4.11 / BE 的 stats SQL）。
+
+#### ⑤ 缓冲半径定 50 m（不是 25）
+
+| 半径 | 面内设施（武大） | 面积 |
+|---|---|---|
+| 25 m | 60 个 | 0.791 km² |
+| **50 m** | **76–80 个** | **1.084–1.185 km²** |
+
+25 m 只有「街两侧各 25 m」，**街区内部的设施被漏掉**（建筑进深通常 20–40 m）。
+实测 25 → 50 多出 27% 的设施，这些正是「在街区里、但走得进去」的那批。
+
+> 代价：面积从 39% 涨到 54%（相对 2.011 km² 的圆），
+> **对比没那么戏剧性，但更诚实**——所以选 50。
+
+#### ⑥ 接口与体积
+
+```http
+GET /api/poi/isochrone?lon=114.36&lat=30.54&budget=800&limit=50
+```
+
+```jsonc
+{
+  "status": "ok",           // no_network = 最近路网比预算还远
+  "nodeId": 26086, "snapM": 11, "usedBudgetM": 789,
+  "areaKm2": 1.168,
+  "surface":  { "type": "Polygon", ... },        // 简化后 ~15 KB
+  "skeleton": { "type": "MultiLineString", ... },// 简化后 ~75 KB
+  "edgeCount": 2951, "partialCount": 130, "walkKm": 35.73,
+  "count": 79, "itemsTotal": 79,
+  "byCategory": { "school": 70, "hospital": 1, "mall": 6, "park": 2 },
+  "items": [...]
+}
+```
+
+| 指标 | 值 |
+|---|---|
+| 未压缩 | **88 KB**（骨架 75 + 面 15） |
+| gzip 后 | **16 KB**（4.6:1）→ 开了 `server.compression` |
+| 耗时 | 武大（2,951 段）**3.2 s**；江汉路（162 段）1.3 s；稀疏区 0.9 s |
+
+#### ⑦ 前端怎么接（三层 + 两张卡）
+
+```
+点选 → analysis.setCenter()
+        ├─ /nearby          （20 ms，数字先出）
+        └─ /isochrone       （2–3 s，串行、后到）
+                ↓
+        drawing.setIsochrone()  → surfaceLayer(96) + networkLayer(97)
+```
+
+| zIndex | 图层 | 内容 |
+|---|---|---|
+| 100 | `source` | 用户画的：红虚线圆 `kind:'circle'` + 圆心 |
+| 97 | `networkLayer` | 可达路网（细线） |
+| 96 | `surfaceLayer` | 可达面（半透明填充） |
+
+**两张卡**：`AnalysisResult`（直线口径，红数字）+ `ReachPanel`（路网口径，蓝数字），
+竖向堆叠在右上（`.right-stack`，`pointer-events: none` + 子元素 `auto`，否则地图拖不动）。
+
+**★ 改 `clear()` 时别忘了两个新 source**：它们不在 `source` 里，
+漏了会出现「退出分析模式后面和路网还挂在图上」。
+
+#### ⑧ 三个必须写进 README 的数据边界
+
+1. **`footway` 只占 7.4%**（893 km）——中国 OSM 人行道标注率低，路网主体是车行道
+2. **`unclassified` 占 21.3%**（16,255 km）——多是乡道、村道、**堤防路**
+   （实测最长一条「汉江干堤」151 km）；`>5 km` 的边 333 条，会一步跨过大片区域
+3. **bbox 裁剪**：BBBike 的框比市界大一圈（113.415–115.359, 29.941–31.387），
+   边界外的路是故意留的，否则等时圈会在边界处「撞墙」
+
+---
+
+### 2.4.17 F7：叠加改为路网口径 + 工具收敛（2026-11-04 完成）
+
+#### ① 工具收敛：矩形 / 自由绘制下线
+
+| 之前 | 现在 | 为什么 |
+|---|---|---|
+| 点选 / 自由绘制 / 框选 / 测距 | **点选 / 测距** | 前两者回答「**这块地里**有什么」（任意范围检索），而本项目问「**从我的位置出发，走得到什么**」——可达性的起点必须是一个点 |
+
+连带删除（不是藏按钮，是摘链路）：`drawing` 的 `freehand`/`rect` 分支与 `createBox`、
+`WKT` 导出 `toWkt`、多边形面积 `getArea`/`formatArea`、`getPolygon()`、`onPolygon` 回调、
+store 的 `geometry`/`setGeometry`、`useBufferAnalysis` 的 `/api/poi/within` 分支与 `WITHIN_LIMIT`。
+
+> **后端 `/api/poi/within` 与 `overlay` 的 `kind='area'` 保留**：接口本身是通用能力
+> （有测试、也被外部调用方可能用到），删前端不等于删接口。
+
+#### ② 叠加 = 多个步行圈求交
+
+```
+之前：circleA(2.01) ∩ circleB(2.01) ∩ circleC(2.01)      ← 直线口径
+现在：isoA(0.99)   ∩ isoB(0.88)   ∩ isoC(0.21)           ← 每个沿路网走出来
+```
+
+**语义**：哪些地方**同时**处在 N 个点的 800 m 步行范围内
+（例如选幼儿园：同时落在爸妈公司和家 800 m 内的片区）。
+
+#### ③ 实现：Java 循环 + 复用细分 SQL（不复制那 200 行）
+
+```
+for 每个圆:
+    poiMapper.isochroneGeom(lon, lat, radius)   → surfaceWkt + surface/skeleton
+    ↓
+把这些面当作 kind='area' 的 WKT，喂给【现有的】overlay SQL
+    ↓
+平面细分 → 原子面 → 按 deg 分组 → 数设施
+```
+
+| 为什么这样做 | 说明 |
+|---|---|
+| 求交逻辑只有一份 | `PoiMapper.overlay` 那 200 行（ST_Node → ST_Polygonize → members）原样复用 |
+| 每个圆的几何能单独返回 | `surfaces[]` 里带 `surface` + `skeleton`，前端逐个画 |
+| 新增 SQL 只有一条轻量版 | `isochroneGeom`：只要几何、不数设施（数设施交给细分统一做，避免重复计数） |
+
+**代价**：N 次往返。实测 3 个圈 **2.6 s / 51 KB**（无明细）、**2.8 s / 70 KB**（`withItems=true`）。
+
+#### ④ 返回结构与"分版统计"
+
+```jsonc
+{
+  "shapeCount": 3,
+  "union":     { "areaKm2": 1.922, "poi": 150, "byCategory": {...} },
+  "intersect": { "empty": true },
+  "byDegree": [
+    { "deg": 1, "faceCnt": 9, "areaKm2": 1.768, "poi": 141 },
+    { "deg": 2, "faceCnt": 2, "areaKm2": 0.155, "poi": 9 }
+  ],
+  "surfaces": [
+    { "id": "s1", "areaKm2": 0.991, "snapM": 62, "usedBudgetM": 738,
+      "edgeCount": 162, "surface": {...}, "skeleton": {...} }
+  ],
+  "items": [ { "gid": 179, "name": "铭新街小学分校", "deg": 2, ... } ]
+}
+```
+
+**口径闭合（实测）**：`union.poi = itemsTotal = items.Count = ΣbyDegree.poi = 150`。
+原子面互不重叠 ⇒ 各度相加必然等于并集，**这条恒等式就是这套算法的验收标准**。
+
+#### ⑤ 两个真 bug（都在这一轮暴露）
+
+**bug 1：`exit()` 没关 `overlay` 开关**
+
+`exit()` 只调 `resetOverlay()`，而它清面、清结果**但不动 `overlay` 布尔值**。
+后果：退出 → 再进分析，直接落在叠加模式（工具栏显示框选、点地图却画不出圆）。
+**修法**：`exit()` 里显式 `this.overlay = false`。
+
+**bug 2：明细/导出打在旧端点**
+
+主请求已改 `/overlay-network`，但 `fetchOverlayItems()`（「展开明细」和「导出 CSV」共用）
+还在打 `/api/poi/overlay`（直线圆版）。表现为：面板说「1 重 0.87 km² / 4 个」，
+展开却是直线圆的另一批设施（42 条 vs 实际 6 条）。
+**修法**：一行 URL 改掉，一处修好两处。
+
+#### ⑥ 一个 Java 层的坑
+
+```java
+// ❌ 编译报「找不到符号 set(String, JsonNode)」
+objectMapper.createObjectNode()
+    .put("id", id)
+    .set("surface", node)      // ObjectNode.set 返回泛型 <T extends JsonNode> T
+    .set("skeleton", node2);   // 链式调用时 javac 推不出 T，静态类型退化成 JsonNode
+```
+
+**必须拆成显式变量**（`ObjectNode one = ...; one.put(...); one.set(...)`）。
+
+> 同轮还遇到：`mvn -o compile` 报 **BUILD SUCCESS** 但运行时报
+> `Unresolved compilation problem`——**增量编译没重编那个文件**。
+> 教训：改 Java 后见到离谱的运行时错误，先 `mvn clean compile`。
+
+---
+
+### 2.4.18 F8：时间口径 80 m/分钟（2026-11-04 完成）
+
+`800 m = 10 分钟` 是项目从 README 到 roadmap 一直用的说法
+（对齐《城市居住区规划设计标准》慢行 500–800 m），于是：
+
+```
+速度 = 800 / 10 = 80 m/分钟 = 1.33 m/s
+```
+
+#### ① 常量只写一处
+
+```js
+// stores/analysis.js
+export const WALK_M_PER_MIN = 80;
+export function minutesText(meters) { ... }   // 「10 分钟」/「3.5 分钟」
+```
+
+**滑杆、地图圆圈标签、两个结果面板全读它**。分开各写一个数字的后果是
+「滑杆说 15 分钟、地图标签说 14 分钟」——两边单独看都对，最难查。
+
+#### ② 三处显示
+
+| 位置 | 效果 |
+|---|---|
+| 工具栏滑杆 | `1250 m ≈ 15.6 分钟`（主数值红色加粗，分钟数小一号淡一档） |
+| 地图圆圈标签 | `缓冲区 800 m ≈ 10 分钟` |
+| 结果面板 | `76 个设施在 800 m（≈10 分钟）内` |
+
+**换算表**（`step=50` 时常见值）：100→1.3 / 400→5 / 600→7.5 / **800→10** / 1000→12.5 / **1200→15** / 1600→20 / 2000→25 分钟。
+
+> **路网卡显示的不是 slider 值**：它写 `usedBudgetM`（800 − 吸附距离），
+> 所以会出现「609 m ≈ 7.6 分钟」——这不是 bug，而是「起点被吸到 191 m 外」的诚实结果。
+
+#### ③ 分钟的样式为什么弱一档
+
+```css
+.tp-cur-min { font-size: 9.5px; color: #c26a5a; font-weight: 400; }
+```
+
+**米是事实，分钟是按步速折算的**。视觉上区分开，用户一眼知道
+「主数值是我设的，旁边那个是换算」。
+
+---
+
 ### 2.5 可以一直不做的（先不做）
 
 | 组件 | 替代方案 |
@@ -1705,8 +2018,17 @@ src/
 > | `map/useMap.js` | 并进 `view/mapView.vue`（建图/销毁写在 `onMounted` / `onBeforeUnmount`） |
 > | `composables/useLayerSync.js` | `watchControl/watchController.js`（`stops` 栈，§2.4.13 ⑦） |
 > | `composables/useFeatureInfo.js` | `map/probe.js`（统一探针）+ `map/clickToGid.js`（§2.3 第 7 行） |
-> | `components/LegendPanel.vue` | `components/MapLegend.vue`（三模式 `poi` / `heat` / `degree`） |
+> | `components/LegendPanel.vue` | `components/MapLegend.vue`（四模式 `poi` / `heat` / `degree` / `isochrone`） |
 > | `styles/main.css` + `styles/panels.css` | 单个 `src/style.css` |
+
+> **2026-11-04 追加（F6–F8 落地后）**：
+>
+> | 新增 | 职责 |
+> |---|---|
+> | `components/ReachPanel.vue` | 路网可达结果卡（面积/设施/分类/路网统计/导出） |
+> | `map/drawing.js` 的 `surfaceLayer`(96) / `networkLayer`(97) | 可达面 / 可达路网（叠加模式复用同一对图层画 N 个面） |
+> | `stores/analysis.js` 的 `WALK_M_PER_MIN` / `minutesText()` | 时间口径（80 m/分钟），滑杆/标签/面板共用 |
+> | `BE/.../mapper/PoiMapper.xml` 的 `isochrone` / `isochroneGeom` | 九步等时圈 / 只要几何版（§2.4.16③） |
 >
 > 实际多出来的关键文件：
 >
@@ -1850,7 +2172,7 @@ nullif(nullif(raw->'biz_ext'->>'open_time','[]'),'')       as open_time
 
 ---
 
-## 5. 后端接口契约（8 个已实现，2026-11-02）
+## 5. 后端接口契约（10 个已实现，2026-11-04）
 
 > 原则：**键永远存在，缺值给 `null`**；不透传高德原始 JSON。
 
@@ -1866,6 +2188,8 @@ nullif(nullif(raw->'biz_ext'->>'open_time','[]'),'')       as open_time
 | 6 | `GET /api/poi/within` | ✅ 2026-10-31 | `wkt` [limit=20] | 三角形 → count 125 / areaKm2 5.85 |
 | 7 | `GET /api/stats/coverage` | ✅ D9 | `adcode` | 420106 → total 1681 / perKm2 16.8 |
 | 8 | `POST /api/poi/overlay` | ✅ 2026-11-02 | body `shapes[]` [withItems=false] | 3 面 → 并集 4.087km²/165 个，7 块原子面；withItems=true 时 26KB / 165 条明细 |
+| 9 | `GET /api/poi/isochrone` | ✅ 2026-11-04 | `lon` `lat` [budget=800] [limit=50] | 武大：snap 11m / 实用 789m / 1.168km² / 79 个 / 2,951 段+130 半截 / 88KB→gzip 16KB / 3.2s |
+| 10 | `POST /api/poi/overlay-network` | ✅ 2026-11-04 | body `shapes[]`（只收 circle） [withItems=false] | 3 圈：2.6s / 51KB；并集 1.922km²/150 个；1 重 141 / 2 重 9；口径闭合 Σdeg=union=items=150 |
 
 **约定**：JSON 字段**全驼峰**（`amapId` / `radiusM` / `byCategory` / `areaKm2`）；`photos` 恒为数组（无照片时 `[]`）；
 HTTP 错误统一 `{timestamp,status,error,message,path}` —— `message` 里是具体原因（2026-10-31 打开
@@ -2225,7 +2549,10 @@ HTTP 错误统一 `{timestamp,status,error,message,path}` —— `message` 里�
 | **D18 完成** ✅ | 500 m 格网分级渲染（覆盖率热力）+ 图例可读 —— **2026-11-01 实测**：① 39,820 格 / 5 个 SLD 均可渲染 ② 点类别 1 次 GetMap 即换色（`updateParams`）③ 图例随类别在「倍数 / 个数」两套文案间切换 ④ 点格取数正确（z≥11 时江汉路格 total=176，与库内一致）⑤ 进分析模式自动让位并恢复 |
 | **F2–F3 完成** ✅ | 悬停有反馈且不刷请求，选中与悬停可并存 —— **2026-11-01 实测**：① 热力格悬停出深/白双描边 + 该格数量，POI 悬停出光圈 + 名称 ② 探针单次 **12 ms**，四道锁（90 ms / 5 px / 结果去重 / inFlight）下拖动不堆积 ③ `z<11` 时不查并浮出「放大到 z11」提示 ④ 选中框与悬停框可同时存在，关卡/切走自动收回 ⑤ 缓冲圈半径按 `1/cos(φ)` 补偿后，图上 800 m 与后端 `ST_DWithin(...,800)` 同口径 |
 | **F5 完成** ✅ | `POST /api/poi/overlay` 3 个两两相交的圆 → 原子面 **7 块**（维恩图一块不多一块不少）；并集 4.087 km² / 165 个，交集 0.968 km² / 54 个；**两条恒等式成立**：1.533+1.586+0.968 = 4.087、52+59+54 = 165 —— **2026-11-02 实测** |
-| **D20 完成** | 30 秒录屏；README 含架构图、启动步骤、5 张截图、踩坑记录 —— **README ✅（2026-11-03 已含叠加分析、悬停/选中共 5 段能力）**，**录屏未录**；`docs/img/` 缺 F5 与悬停两张截图 |
+| **F6 完成** ✅ | 点选后**同时**出三层（红虚线圆 / 蓝可达面 / 蓝可达路网）+ 两张对照卡 —— **2026-11-04 实测**：① 武大点 snap 11 m / 实用 789 m / 1.168 km² / 79 个，与直线口径 2.011 km² / 83 个形成对照 ② 江汉路 0.991 km² / 92 个 vs 直线 178 个 ③ 稀疏区正确返回 `no_network`（最近路网 1198 m > 预算）④ gzip 后 16 KB ⑤ 响应 3.2 s（2,951 段） |
+| **F7 完成** ✅ | 叠加只叠圆、且每圆先算可达面 —— **2026-11-04 实测**：① 工具栏只剩「点选 / 测距」② 叠加连点 4 个点 → 4/6 个可达面各自出面积（0.991/0.876/0.212…）与路网 ③ 3 个相交圈：并集 1.922 km² / 150 个，1 重 141 + 2 重 9 = 150（**闭合**）④ 明细每条带 `deg`，`itemsTotal = union.poi` |
+| **F8 完成** ✅ | 滑杆/标签/面板的时间与米数同源 —— **2026-11-04 实测**：拖到 800 显示 `≈10 分钟`、拖到 1250 显示 `≈15.6 分钟`；换算表 100→1.3 / 400→5 / 1200→15 / 2000→25 |
+| **D20 完成** | 30 秒录屏；README 含架构图、启动步骤、5 张截图、踩坑记录 —— **README ✅（2026-11-04 已含路网可达、叠加路网口径、时间口径）**，**录屏未录**；`docs/img/` 缺等时圈与叠加路网两张截图 |
 
 ---
 
@@ -2266,7 +2593,32 @@ ANALYZE poi;   -- 大批量导入后必做，否则优化器用旧的行数分�
 | 读数据页 `Buffers` | 4758 | **200** |
 | 规划成本 `cost` | 88388 | 1629 |
 
-> 注意：早先误建的 `idx_poi_geom_gist ON poi USING GIST (geom)` **用不上**，已删除。
+> 注意：**不是「`GIST(geom)` 没用」，而是「它对这个查询没用」**。
+> `ST_DWithin(geom::geography, …)` 筛的是表达式，必须建表达式索引；
+> 而 `ST_Within(p.geom, 面)` / `ST_Contains` 筛的是 `geom` 本身，
+> 恰恰需要 `GIST(geom)`。2026-11-04 又把它建回来了，见 §10.1b。
+
+### 10.1b `GIST(geom)` 索引（2026-11-04 补，等时圈/叠加必需）
+
+```sql
+-- ★ 名字不能叫 idx_poi_geom：被 poi_scratch_20261025 的索引占着（同名会报 already exists）
+CREATE INDEX idx_poi_geom_gist ON poi USING GIST (geom);   -- 611 ms，648 kB
+ANALYZE poi;
+```
+
+**为什么必须**：等时圈最后一步是 `ST_Within(p.geom, 可达面)`，叠加细分是
+`ST_Contains(原子面, ST_PointOnSurface(p.geom))` —— 两者筛的都是 `geom` 列本身，
+表达式索引 `idx_poi_geog` 匹配不上 → `poi` 16,016 行全表扫 × 复杂面几何判断 = **分钟级**。
+
+实测：加索引前同一条等时圈 SQL **>120 s 不返回**（当时还叠着 CTE 内联的坑），
+加索引并修好 `MATERIALIZED` 后 **2.5–3.2 s**。
+
+> **两个索引分工记牢**（别互相替代）：
+>
+> | 索引 | 被谁用 | 谓词形态 |
+> |---|---|---|
+> | `idx_poi_geog` = `GIST((geom::geography))` | `/nearby` 的 `ST_DWithin` | 表达式（米） |
+> | `idx_poi_geom_gist` = `GIST(geom)` | `/isochrone`、`/overlay*` 的 `ST_Within` / `ST_Contains` | 列（度） |
 > 规则：凡 `where` 里对列做了函数/类型转换（`::`、`lower()`、`ST_Transform()`），想走索引就必须建**表达式索引**。
 
 ### 10.2 nearby 查询的标准写法（D8/D13 照此实现）
@@ -2313,3 +2665,47 @@ limit 5;
 ANALYZE poi;        -- 补统计，不影响业务读写
 ```
 `autovacuum` 会在改动量达阈值时自动跑 `ANALYZE`，手动执行只针对「一次性大批量导入」和「调试执行计划」两个场景。
+
+### 10.5 步行网表（F6 新增，换机器必须重建）
+
+等时圈依赖两张由 `osm2pgrouting` 生成的表，**它们不在任何 SQL 迁移脚本里**，
+换台机器部署时必须重新导入（§2.4.16② 有完整踩坑记录）：
+
+| 表 | 内容 | 实测规模 |
+|---|---|---|
+| `walk_ways` | 步行网边（PK 是 **`id`**，几何列是 **`geom`**，米制长度在 `length_m`） | 241,611 行 |
+| `walk_ways_vertices_pgr` | 节点（`id` / `geom` / `source` 反向引用） | 183,396 行 |
+| `configuration` | `tag_id → tag_key/tag_value`（`walk_ways` **没有** `highway` 列，类型靠它反查） | 20 行 |
+
+```powershell
+# 前置：扩展要按库启用（盘上有文件 ≠ 库里能用）
+psql -c "CREATE EXTENSION IF NOT EXISTS pgrouting;"
+psql -c "CREATE EXTENSION IF NOT EXISTS hstore;"      # --attributes 需要
+
+# ★ 中文用户名会让 GDAL 写不出临时索引（路径变 ????），先把 TMP 指到纯英文目录
+$env:TMP = 'D:\osm_tmp'; $env:TEMP = 'D:\osm_tmp'; $env:GDAL_TMPDIR = 'D:\osm_tmp'
+
+# ★ 3.0.0 只吃 .osm XML（expat 解析，无 pbf 支持）
+osm2pgrouting -f planet_113.415,29.941_115.359,31.387.osm `
+  -d <db> -U <user> -W <pwd> -h localhost -p 5432 `
+  --conf mapconfig.xml --attributes --addnodes
+```
+
+**验收查询**（不跑等时圈也能确认导入成功）：
+
+```sql
+-- 边数应与导入日志一致
+SELECT count(*) FROM walk_ways;                               -- 241611
+-- 连通性：最大分量占比应 >80%（本项目 95.55%）
+SELECT max(pct) FROM (
+  SELECT 100.0 * count(*) / sum(count(*)) OVER () AS pct
+  FROM pgr_connectedComponents(
+    'SELECT id, source, target, length_m AS cost FROM walk_ways')
+  GROUP BY component
+) t;
+-- 单位自检：cost 是度、length_m 是米，两者比例 ≈ 1/111320
+SELECT round(avg(cost / NULLIF(length_m,0))::numeric, 8) FROM walk_ways;  -- ≈0.00000898
+```
+
+> **`cost` / `reverse_cost` 千万别直接用**：osm2pgrouting 写进去的是**度**（179 m → 0.00186）。
+> 所有 `pgr_*` 调用的边 SQL 一律写 `length_m AS cost, length_m AS reverse_cost`。
