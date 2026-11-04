@@ -526,9 +526,15 @@ const onOverlayRetry = () => {
  *
  * ★ 主接口默认 withItems=false（4KB vs 26KB），所以这是**按需**的额外一次请求。
  * ★ 失败不抛到界面上：面板显示「加载失败」，导出退回只导统计。
+ *
+ * ★★ 必须和主请求同一个端点（overlay-network）。
+ *    2026-11-04 踩过：主请求已经改成路网口径，这里还留在 /api/poi/overlay，
+ *    于是面板上是「按重叠度 1 重 0.87 km² / 4 个」（可达面口径），
+ *    展开明细却是直线圆那 42 条 —— 一张卡里两套口径，数字对不上。
+ *    CSV 导出也走这个函数，所以这一行同时修好了明细和导出。
  */
 async function fetchOverlayItems() {
-  const res = await fetch('/api/poi/overlay', {
+  const res = await fetch('/api/poi/overlay-network', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({
